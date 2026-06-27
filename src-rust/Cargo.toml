@@ -1,0 +1,10 @@
+[package]
+name = "image_processor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# We do not need external crates to keep compilation ultra-fast and lightweight.
