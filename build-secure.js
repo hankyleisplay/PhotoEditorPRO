@@ -58,6 +58,7 @@ try {
 
 } catch (err) {
     console.error("❌ Critical error during secure build pipeline:", err);
+    process.exitCode = 1; // let CI notice the failure
 } finally {
     // 4. Restore original source code files so developer has clean code
     console.log("------------------------------------------");

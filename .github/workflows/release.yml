@@ -1,0 +1,57 @@
+name: Release
+
+# Push a tag such as v1.1.0 to build the Windows installers and publish a GitHub release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check tag matches package.json version
+        shell: bash
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - name: Check license public key
+        shell: bash
+        run: |
+          if [ ! -f license-public.json ]; then
+            echo "::warning::license-public.json is missing: the build cannot verify any license key. Run 'node tools/license.js init' and commit license-public.json."
+          fi
+
+      - run: npm ci
+
+      - name: Build (obfuscate + electron-builder)
+        run: npm run build:secure
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Verify installers were produced
+        shell: bash
+        run: |
+          ls -la dist
+          ls dist/*.exe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
