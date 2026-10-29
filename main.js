@@ -1,121 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
-const crypto = require('crypto');
-
-const licenseFile = path.join(app.getPath('userData'), 'license.json');
-
-let hwidPromise = null;
-
-// Runs a PowerShell command without blocking the main process (and without flashing a console window).
-function runPowerShell(command) {
-    return new Promise((resolve) => {
-        execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
-            encoding: 'utf8',
-            windowsHide: true,
-            timeout: 10000
-        }, (error, stdout) => {
-            resolve(error ? '' : (stdout || '').trim());
-        });
-    });
-}
-
-async function queryHardwareID() {
-    let boardUUID = "";
-    let cpuID = "";
-
-    // Query both properties in a single PowerShell process
-    const powershellCmd = '$board=(Get-CimInstance Win32_ComputerSystemProduct).UUID; if (!$board -or $board -eq "00000000-0000-0000-0000-000000000000") { $board=(Get-CimInstance Win32_BIOS).SerialNumber }; $cpu=(Get-CimInstance Win32_Processor).ProcessorId; Write-Output "$board|$cpu"';
-    const parts = (await runPowerShell(powershellCmd)).split('|');
-    if (parts.length >= 2) {
-        boardUUID = parts[0].trim();
-        cpuID = parts[1].trim();
-    }
-
-    // Fallback to individual commands if the combined command fails or returns empty results
-    if (!boardUUID && !cpuID) {
-        boardUUID = await runPowerShell('(Get-CimInstance Win32_ComputerSystemProduct).UUID');
-        if (!boardUUID || boardUUID === "00000000-0000-0000-0000-000000000000") {
-            boardUUID = await runPowerShell('(Get-CimInstance Win32_BIOS).SerialNumber');
-        }
-        cpuID = await runPowerShell('(Get-CimInstance Win32_Processor).ProcessorId');
-    }
-
-    if (!boardUUID && !cpuID) {
-        return require('os').hostname() || "UNKNOWN-HOST";
-    }
-    return `${boardUUID}-${cpuID}`.trim();
-}
-
-// Resolved once and cached; the HWID format is unchanged so existing license keys stay valid.
-function getHardwareID() {
-    if (!hwidPromise) {
-        hwidPromise = queryHardwareID().catch(() => "UNKNOWN-HWID");
-    }
-    return hwidPromise;
-}
-
-// ---- License verification ----
-// A license key is an Ed25519 signature of the hardware ID (Base32, grouped by 5). Only the public key
-// ships with the app (license-public.json); keys are issued with tools/license.js and the private key.
-const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-
-function decodeBase32(text) {
-    let bits = 0, value = 0;
-    const out = [];
-    for (const ch of text) {
-        const idx = BASE32_ALPHABET.indexOf(ch);
-        if (idx < 0) return null;
-        value = (value << 5) | idx;
-        bits += 5;
-        if (bits >= 8) {
-            out.push((value >>> (bits - 8)) & 255);
-            bits -= 8;
-        }
-    }
-    return Buffer.from(out);
-}
-
-function normalizeKey(key) {
-    return typeof key === 'string' ? key.replace(/[\s-]+/g, '').toUpperCase() : '';
-}
-
-let cachedPublicKey;
-function getPublicKey() {
-    if (cachedPublicKey !== undefined) return cachedPublicKey;
-    try {
-        const file = path.join(__dirname, 'license-public.json');
-        const { publicKey } = JSON.parse(fs.readFileSync(file, 'utf8'));
-        cachedPublicKey = crypto.createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
-    } catch (e) {
-        console.error('License public key unavailable:', e.message);
-        cachedPublicKey = null;
-    }
-    return cachedPublicKey;
-}
-
-function verifyKey(hwid, key) {
-    if (!hwid || hwid === "UNKNOWN-HWID") return false;
-    const publicKey = getPublicKey();
-    const signature = decodeBase32(normalizeKey(key));
-    if (!publicKey || !signature || signature.length !== 64) return false;
-    try {
-        return crypto.verify(null, Buffer.from(hwid, 'utf8'), publicKey, signature);
-    } catch (e) {
-        return false;
-    }
-}
-
-async function isLicenseValid() {
-    if (!fs.existsSync(licenseFile)) return false;
-    try {
-        const data = JSON.parse(fs.readFileSync(licenseFile, 'utf8'));
-        return !!data && verifyKey(await getHardwareID(), data.key);
-    } catch (e) {
-        return false;
-    }
-}
 
 function createWindow() {
     const mainWindow = new BrowserWindow({
@@ -187,14 +72,6 @@ if (!gotTheLock) {
 
     app.whenReady().then(() => {
         // Register IPC handlers
-        ipcMain.handle('get-hwid', () => {
-            return getHardwareID();
-        });
-        
-        ipcMain.handle('check-license', async () => {
-            return isLicenseValid();
-        });
-        
         ipcMain.handle('load-wasm', () => {
             try {
                 const wasmPath = path.join(__dirname, 'image_processor.wasm');
@@ -214,18 +91,6 @@ if (!gotTheLock) {
             }
         });
         
-        ipcMain.handle('verify-and-save', async (event, key) => {
-            const hwid = await getHardwareID();
-            if (!verifyKey(hwid, key)) return false;
-            try {
-                fs.writeFileSync(licenseFile, JSON.stringify({ key: normalizeKey(key) }), 'utf8');
-                return true;
-            } catch (e) {
-                console.error("Failed to write license file:", e);
-                return false;
-            }
-        });
-
         createWindow();
 
         app.on('activate', () => {

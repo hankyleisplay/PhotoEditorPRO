@@ -264,135 +264,6 @@ const PRESETS = {
  * INITIALIZATION & EVENT LISTENERS
  * ========================================== */
 
-// Browser fallback (dev server / web): verifies an Ed25519 license signature with the public key only.
-// Needs a browser with Ed25519 in Web Crypto; the desktop app verifies in the main process instead.
-const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-
-function decodeBase32(text) {
-    let bits = 0, value = 0;
-    const out = [];
-    for (const ch of text) {
-        const idx = BASE32_ALPHABET.indexOf(ch);
-        if (idx < 0) return null;
-        value = (value << 5) | idx;
-        bits += 5;
-        if (bits >= 8) {
-            out.push((value >>> (bits - 8)) & 255);
-            bits -= 8;
-        }
-    }
-    return new Uint8Array(out);
-}
-
-async function verifyBrowserKey(hwid, key) {
-    try {
-        const signature = decodeBase32(String(key).replace(/[\s-]+/g, '').toUpperCase());
-        if (!signature || signature.length !== 64) return false;
-        const response = await fetch('license-public.json', { cache: 'no-store' });
-        if (!response.ok) return false;
-        const { publicKey } = await response.json();
-        const der = Uint8Array.from(atob(publicKey), c => c.charCodeAt(0));
-        const cryptoKey = await crypto.subtle.importKey('spki', der, { name: 'Ed25519' }, false, ['verify']);
-        return await crypto.subtle.verify({ name: 'Ed25519' }, cryptoKey, signature, new TextEncoder().encode(hwid));
-    } catch (e) {
-        console.error('Browser license verification failed:', e);
-        return false;
-    }
-}
-
-// License Validation Flow
-async function checkLicense() {
-    const overlay = document.getElementById('license-overlay');
-    const displayHwid = document.getElementById('display-hwid');
-    const inputKey = document.getElementById('input-license-key');
-    const btnActivate = document.getElementById('btn-activate-license');
-    const btnCopyHwid = document.getElementById('btn-copy-hwid');
-    const errorMsg = document.getElementById('license-error-msg');
-    
-    if (!overlay) return;
-
-    let isLicensed = false;
-    let hwid = "";
-
-    if (window.licenseAPI) {
-        // Electron Environment
-        isLicensed = await window.licenseAPI.checkLicense();
-        hwid = await window.licenseAPI.getHWID();
-    } else {
-        // Browser Fallback (e.g. development server)
-        hwid = "BROWSER-MODE-DEMO-HWID-2026";
-        const savedKey = safeStorageGet('license_key');
-        isLicensed = !!savedKey && await verifyBrowserKey(hwid, savedKey);
-    }
-
-    if (isLicensed) {
-        overlay.style.display = 'none';
-        return;
-    }
-
-    // Show Overlay
-    overlay.style.display = 'flex';
-    displayHwid.textContent = hwid;
-
-    // Hook up Copy Button
-    btnCopyHwid.addEventListener('click', async () => {
-        try {
-            await navigator.clipboard.writeText(hwid);
-        } catch (e) {
-            showToast('無法存取剪貼簿，請手動選取識別碼複製', 'error');
-            return;
-        }
-        const icon = btnCopyHwid.querySelector('svg, i');
-        if (icon) {
-            const swap = (name) => {
-                btnCopyHwid.innerHTML = `<i data-lucide="${name}" style="width: 16px; height: 16px;"></i>`;
-                lucide.createIcons();
-            };
-            swap('check');
-            setTimeout(() => swap('copy'), 2000);
-        }
-    });
-
-    // Hook up Activate Button
-    let activating = false;
-    const activate = async () => {
-        if (activating) return;
-        const key = inputKey.value.trim().toUpperCase();
-        if (!key) return;
-        activating = true;
-
-        let success = false;
-        try {
-            if (window.licenseAPI) {
-                success = await window.licenseAPI.verifyAndSave(key);
-            } else {
-                if (await verifyBrowserKey(hwid, key)) {
-                    safeStorageSet('license_key', key);
-                    success = true;
-                }
-            }
-        } catch (e) {
-            console.error('License verification failed:', e);
-        } finally {
-            activating = false;
-        }
-
-        if (success) {
-            errorMsg.style.display = 'none';
-            overlay.style.display = 'none';
-            lucide.createIcons();
-        } else {
-            errorMsg.style.display = 'block';
-            inputKey.classList.add('error-pulse');
-            setTimeout(() => inputKey.classList.remove('error-pulse'), 500);
-        }
-    };
-    btnActivate.addEventListener('click', activate);
-    inputKey.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') activate();
-    });
-}
-
 let wasmExports = null;
 let wasmFailures = 0;
 
@@ -780,9 +651,6 @@ function init() {
         }
     }, true);
 
-    // Check for license key activation
-    checkLicense();
-
     // Start WASM Loading and splash animation
     initWasm();
 
@@ -1074,7 +942,7 @@ function setupWindowEvents() {
         
         // Modal dialogs: Escape closes them, everything else is left alone
         const openModal = Array.from(document.querySelectorAll('.modal-overlay'))
-            .find(m => m.id !== 'license-overlay' && m.style.display !== 'none');
+            .find(m => m.style.display !== 'none');
         if (openModal) {
             if (key === 'escape') {
                 const closeBtn = openModal.querySelector('.modal-close, #btn-export-cancel');
@@ -1082,7 +950,6 @@ function setupWindowEvents() {
             }
             return;
         }
-        if (document.getElementById('license-overlay').style.display === 'flex') return;
         
         // Ctrl+O: open a photo (works before an image is loaded)
         if (mod && key === 'o') {

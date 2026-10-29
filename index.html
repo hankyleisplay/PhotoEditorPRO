@@ -710,47 +710,6 @@
         </main>
     </div>
 
-    <!-- License Activation Modal Overlay -->
-    <div id="license-overlay" class="modal-overlay" style="display: none;">
-        <div class="modal-content license-modal animate-scale-in">
-            <div class="modal-header">
-                <h2>Photo Editor PRO 授權驗證</h2>
-            </div>
-            <div class="modal-body">
-                <p>本軟體為商業授權版。為保護軟體智慧財產，請輸入您的授權序號以啟用完整功能。</p>
-                
-                <div class="license-info-group">
-                    <label>您的本機硬體識別碼 (Hardware ID):</label>
-                    <div class="hwid-container">
-                        <span id="display-hwid">正在取得本機識別碼...</span>
-                        <button class="btn btn-secondary btn-sm" id="btn-copy-hwid" title="複製識別碼" style="padding: 4px 8px; border: none; background: transparent; color: var(--text-muted); cursor: pointer;">
-                            <i data-lucide="copy" style="width: 16px; height: 16px;"></i>
-                        </button>
-                    </div>
-                </div>
-
-                <div class="license-info-group">
-                    <label for="input-license-key">請輸入授權序號 (License Key):</label>
-                    <input type="text" id="input-license-key" placeholder="貼上您的授權序號（XXXXX-XXXXX-XXXXX-…）" autocomplete="off">
-                </div>
-
-                <div id="license-error-msg" class="error-msg" style="display: none;">
-                    序號驗證失敗！請確認是否輸入正確。
-                </div>
-
-                <div class="license-actions">
-                    <button class="btn btn-primary" id="btn-activate-license">
-                        <i data-lucide="key-round"></i>
-                        <span>啟用軟體</span>
-                    </button>
-                </div>
-                <div class="license-warning-disclaimer" style="margin-top: 20px; font-size: 0.75rem; color: var(--danger); line-height: 1.4; text-align: center; opacity: 0.85; border-top: 1px dashed rgba(239, 68, 68, 0.2); padding-top: 12px;">
-                    ⚠️ 本軟體受著作權法保護，任何逆向工程、反編譯、破解或篡改行為皆為法律不允許，違反者將追究法律責任。
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Export Modal Overlay -->
     <div id="export-overlay" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="export-title">
         <div class="modal-content export-modal animate-scale-in">
@@ -802,27 +761,22 @@
             <div class="modal-header" style="border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px;">
                 <h2 style="font-size: 1.15rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                     <i data-lucide="scale" style="width: 20px; height: 20px; color: var(--primary);"></i>
-                    <span>智慧財產權與法律聲明</span>
+                    <span>關於與開源聲明</span>
                 </h2>
                 <button class="modal-close" id="btn-close-legal" style="background: transparent; border: none; color: var(--text-muted); font-size: 1.4rem; cursor: pointer; transition: var(--transition-fast);">&times;</button>
             </div>
             <div class="modal-body" style="overflow-y: auto; flex: 1; padding-right: 8px; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
                 <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Photo Editor PRO v1.1.0</h3>
                 <p style="margin-bottom: 16px;">
-                    本軟體是一款專為攝影愛好者與專業設計師打造的高級相片編輯器。所有核心影像處理演算法皆採用 <b>Rust</b> 編寫並編譯為 <b>WebAssembly</b> 進行高速硬體加速以提供最優異的性能表現，並使用多層混淆及防逆向工程技術進行完整保護。
+                    本軟體是一款專為攝影愛好者與專業設計師打造的相片編輯器。所有核心影像處理演算法皆採用 <b>Rust</b> 編寫並編譯為 <b>WebAssembly</b> 進行高速硬體加速以提供最優異的性能表現。本軟體免費且開源，歡迎自由使用、研究與修改。
                 </p>
                 
-                <h4 style="font-size: 0.88rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">1. 智慧財產權與終端使用者授權合約 (EULA)</h4>
+                <h4 style="font-size: 0.88rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">1. 免費與開源</h4>
                 <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px;">
-                    本軟體受著作權法、專利法及國際條約智慧財產權保護。Photo Editor PRO 保留本軟體所有相關之權利。使用者僅獲得非排他性、不可轉讓之單一實體裝置授權，嚴禁複製、散佈、出租、再授權或分發授權金鑰。
+                    Photo Editor PRO 完全免費，不需要授權序號或啟用，開啟即可使用。原始碼公開，歡迎自由使用、學習、修改與分享。
                 </p>
-                
-                <h4 style="font-size: 0.88rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">2. 嚴禁逆向工程與破解聲明</h4>
-                <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px; border-left: 2.5px solid var(--danger); padding-left: 10px; background: rgba(239, 68, 68, 0.03);">
-                    使用者承諾，不會且不會協助他人對本軟體進行反向工程 (Reverse Engineering)、反編譯 (Decompile)、反彙編 (Disassemble)、提取原始碼或試圖規避繞過本軟體任何授權保護系統（包括但不限於硬體鎖 HWID 與 License Key 授權機制）。任何此類侵權行為將依法即時終止授權，並將對侵權者追究一切法律責任（包含民事侵權賠償與刑事追訴責任）。
-                </p>
-                
-                <h4 style="font-size: 0.88rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">3. 第三方組件開源聲明</h4>
+
+                <h4 style="font-size: 0.88rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">2. 第三方組件開源聲明</h4>
                 <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 16px;">
                     本軟體使用以下開源及優質組件，特此致謝：
                     <br>
@@ -836,7 +790,7 @@
                 </p>
             </div>
             <div class="modal-footer" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 12px; display: flex; justify-content: flex-end;">
-                <button class="btn btn-primary" id="btn-legal-confirm" style="padding: 8px 20px; font-size: 0.8rem;">我已閱讀並同意以上條款</button>
+                <button class="btn btn-primary" id="btn-legal-confirm" style="padding: 8px 20px; font-size: 0.8rem;">關閉</button>
             </div>
         </div>
     </div>
