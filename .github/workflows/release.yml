@@ -1,40 +1,70 @@
 name: Release
 
+# Builds the Windows installers and publishes a GitHub release named after package.json's version.
+# Triggers: push a v* tag, run it manually, or push a commit whose message contains "[release]"
+# (the workflow then creates the tag itself).
 on:
   push:
+    branches: ['**']
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to create (e.g. v1.0.0)
-        required: true
-        default: v1.0.0
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+
+      - name: Resolve release tag
+        id: version
+        shell: bash
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "$pkg" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+          echo "tag=$pkg" >> "$GITHUB_OUTPUT"
+
+      - name: Check license public key
+        shell: bash
+        run: |
+          if [ ! -f license-public.json ]; then
+            echo "::warning::license-public.json is missing: the build cannot verify any license key. Run 'node tools/license.js init' and commit license-public.json."
+          fi
 
       - run: npm ci
 
-      - name: Build Windows installers
-        run: npx electron-builder --win --publish never
+      - name: Build (obfuscate + electron-builder)
+        run: npm run build:secure
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: Publish GitHub Release
+      - name: Verify installers were produced
+        shell: bash
+        run: |
+          ls -la dist
+          ls dist/*.exe
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
+          name: Photo Editor PRO ${{ steps.version.outputs.tag }}
+          files: dist/*.exe
           generate_release_notes: true
-          files: |
-            dist/*.exe
+          fail_on_unmatched_files: true

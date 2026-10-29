@@ -1,126 +1,122 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawnSync } = require('child_process');
+const { execFile } = require('child_process');
 const crypto = require('crypto');
 
 const licenseFile = path.join(app.getPath('userData'), 'license.json');
 
-let cachedHWID = null;
+let hwidPromise = null;
 
+// Runs a PowerShell command without blocking the main process (and without flashing a console window).
+function runPowerShell(command) {
+    return new Promise((resolve) => {
+        execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 10000
+        }, (error, stdout) => {
+            resolve(error ? '' : (stdout || '').trim());
+        });
+    });
+}
+
+async function queryHardwareID() {
+    let boardUUID = "";
+    let cpuID = "";
+
+    // Query both properties in a single PowerShell process
+    const powershellCmd = '$board=(Get-CimInstance Win32_ComputerSystemProduct).UUID; if (!$board -or $board -eq "00000000-0000-0000-0000-000000000000") { $board=(Get-CimInstance Win32_BIOS).SerialNumber }; $cpu=(Get-CimInstance Win32_Processor).ProcessorId; Write-Output "$board|$cpu"';
+    const parts = (await runPowerShell(powershellCmd)).split('|');
+    if (parts.length >= 2) {
+        boardUUID = parts[0].trim();
+        cpuID = parts[1].trim();
+    }
+
+    // Fallback to individual commands if the combined command fails or returns empty results
+    if (!boardUUID && !cpuID) {
+        boardUUID = await runPowerShell('(Get-CimInstance Win32_ComputerSystemProduct).UUID');
+        if (!boardUUID || boardUUID === "00000000-0000-0000-0000-000000000000") {
+            boardUUID = await runPowerShell('(Get-CimInstance Win32_BIOS).SerialNumber');
+        }
+        cpuID = await runPowerShell('(Get-CimInstance Win32_Processor).ProcessorId');
+    }
+
+    if (!boardUUID && !cpuID) {
+        return require('os').hostname() || "UNKNOWN-HOST";
+    }
+    return `${boardUUID}-${cpuID}`.trim();
+}
+
+// Resolved once and cached; the HWID format is unchanged so existing license keys stay valid.
 function getHardwareID() {
-    if (cachedHWID !== null) {
-        return cachedHWID;
+    if (!hwidPromise) {
+        hwidPromise = queryHardwareID().catch(() => "UNKNOWN-HWID");
     }
-
-    try {
-        let boardUUID = "";
-        let cpuID = "";
-
-        // Query both properties in a single PowerShell process using spawnSync to avoid shell quoting/escaping issues
-        const powershellCmd = '$board=(Get-CimInstance Win32_ComputerSystemProduct).UUID; if (!$board -or $board -eq "00000000-0000-0000-0000-000000000000") { $board=(Get-CimInstance Win32_BIOS).SerialNumber }; $cpu=(Get-CimInstance Win32_Processor).ProcessorId; Write-Output "$board|$cpu"';
-        
-        try {
-            const result = spawnSync('powershell', [
-                '-NoProfile',
-                '-WindowStyle', 'Hidden',
-                '-Command',
-                powershellCmd
-            ], { encoding: 'utf8' });
-
-            if (!result.error) {
-                const rawOutput = (result.stdout || '').trim();
-                const parts = rawOutput.split('|');
-                if (parts.length >= 2) {
-                    boardUUID = parts[0].trim();
-                    cpuID = parts[1].trim();
-                }
-            }
-        } catch (e) {
-            // Ignore optimization failure and fall back
-        }
-        
-        // Fallback to individual commands if the optimized single command fails or returns empty results
-        if (!boardUUID && !cpuID) {
-            try {
-                const resUUID = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_ComputerSystemProduct).UUID'], { encoding: 'utf8' });
-                boardUUID = (resUUID.stdout || '').trim();
-            } catch (e) {
-                // Ignore
-            }
-            
-            if (!boardUUID || boardUUID === "00000000-0000-0000-0000-000000000000") {
-                try {
-                    const resBIOS = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_BIOS).SerialNumber'], { encoding: 'utf8' });
-                    boardUUID = (resBIOS.stdout || '').trim();
-                } catch (e) {
-                    // Ignore
-                }
-            }
-            
-            try {
-                const resCPU = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_Processor).ProcessorId'], { encoding: 'utf8' });
-                cpuID = (resCPU.stdout || '').trim();
-            } catch (e) {
-                // Ignore
-            }
-        }
-        
-        if (!boardUUID && !cpuID) {
-            cachedHWID = require('os').hostname() || "UNKNOWN-HOST";
-        } else {
-            cachedHWID = `${boardUUID}-${cpuID}`.trim();
-        }
-        
-        return cachedHWID;
-    } catch (err) {
-        return "UNKNOWN-HWID";
-    }
+    return hwidPromise;
 }
 
-function generateKey(hwid) {
-    if (!hwid || hwid === "UNKNOWN-HWID") return null;
-    
-    // Obfuscated Salt parts to prevent simple string recovery
-    const _p1 = "PhotoEditorPRO";
-    const _p2 = "Licensing";
-    const _p3 = "System";
-    const _p4 = "SecretSalt";
-    const _p5 = "2026_@#$!";
-    const salt = [_p1, _p2, _p3, _p4, _p5].join("_");
+// ---- License verification ----
+// A license key is an Ed25519 signature of the hardware ID (Base32, grouped by 5). Only the public key
+// ships with the app (license-public.json); keys are issued with tools/license.js and the private key.
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-    // Phase 1: SHA256 of hwid + salt (lowercase hex format)
-    const input1 = hwid + salt;
-    const hash1 = crypto.createHash('sha256').update(input1, 'utf8').digest('hex').toLowerCase();
-    
-    // Phase 2: Reverse hash1 to make reverse engineering harder
-    const reversedHash1 = hash1.split('').reverse().join('');
-    
-    // Phase 3: SHA256 of reversedHash1 + salt + hwid (uppercase hex format)
-    const input2 = reversedHash1 + salt + hwid;
-    const hash2 = crypto.createHash('sha256').update(input2, 'utf8').digest('hex').toUpperCase();
-    
-    // Phase 4: Format as XXXXX-XXXXX-XXXXX-XXXXX
-    const cleanHex = hash2.substring(0, 20);
-    let serial = "";
-    for (let i = 0; i < cleanHex.length; i += 5) {
-        if (i > 0) serial += "-";
-        serial += cleanHex.substring(i, i + 5);
+function decodeBase32(text) {
+    let bits = 0, value = 0;
+    const out = [];
+    for (const ch of text) {
+        const idx = BASE32_ALPHABET.indexOf(ch);
+        if (idx < 0) return null;
+        value = (value << 5) | idx;
+        bits += 5;
+        if (bits >= 8) {
+            out.push((value >>> (bits - 8)) & 255);
+            bits -= 8;
+        }
     }
-    return serial;
+    return Buffer.from(out);
 }
 
-function isLicenseValid() {
-    if (!fs.existsSync(licenseFile)) return false;
+function normalizeKey(key) {
+    return typeof key === 'string' ? key.replace(/[\s-]+/g, '').toUpperCase() : '';
+}
+
+let cachedPublicKey;
+function getPublicKey() {
+    if (cachedPublicKey !== undefined) return cachedPublicKey;
     try {
-        const data = JSON.parse(fs.readFileSync(licenseFile, 'utf8'));
-        const hwid = getHardwareID();
-        const expectedKey = generateKey(hwid);
-        return data && data.key === expectedKey;
+        const file = path.join(__dirname, 'license-public.json');
+        const { publicKey } = JSON.parse(fs.readFileSync(file, 'utf8'));
+        cachedPublicKey = crypto.createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
+    } catch (e) {
+        console.error('License public key unavailable:', e.message);
+        cachedPublicKey = null;
+    }
+    return cachedPublicKey;
+}
+
+function verifyKey(hwid, key) {
+    if (!hwid || hwid === "UNKNOWN-HWID") return false;
+    const publicKey = getPublicKey();
+    const signature = decodeBase32(normalizeKey(key));
+    if (!publicKey || !signature || signature.length !== 64) return false;
+    try {
+        return crypto.verify(null, Buffer.from(hwid, 'utf8'), publicKey, signature);
     } catch (e) {
         return false;
     }
 }
+
+async function isLicenseValid() {
+    if (!fs.existsSync(licenseFile)) return false;
+    try {
+        const data = JSON.parse(fs.readFileSync(licenseFile, 'utf8'));
+        return !!data && verifyKey(await getHardwareID(), data.key);
+    } catch (e) {
+        return false;
+    }
+}
+
 function createWindow() {
     const mainWindow = new BrowserWindow({
         width: 1280,
@@ -135,6 +131,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: true,   // 渲染程序沙盒化（preload 僅使用 contextBridge / ipcRenderer）
             devTools: false, // 停用開發者工具，防止逆向調試
             
             // 降低系統資源消耗的最佳化設定：
@@ -163,6 +160,12 @@ function createWindow() {
         mainWindow.webContents.closeDevTools();
     });
 
+    // 禁止開啟新視窗或導覽到外部網址（例如拖入檔案或點擊連結時，視窗不應跳轉離開編輯器）
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('will-navigate', (event) => {
+        event.preventDefault();
+    });
+
     // 直接載入本地 HTML 檔案，不需額外啟動本機伺服器，速度最快且最省資源
     mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
@@ -188,7 +191,7 @@ if (!gotTheLock) {
             return getHardwareID();
         });
         
-        ipcMain.handle('check-license', () => {
+        ipcMain.handle('check-license', async () => {
             return isLicenseValid();
         });
         
@@ -202,19 +205,25 @@ if (!gotTheLock) {
             }
         });
         
-        ipcMain.handle('verify-and-save', (event, key) => {
-            const hwid = getHardwareID();
-            const expected = generateKey(hwid);
-            if (key && key.trim().toUpperCase() === expected) {
-                try {
-                    fs.writeFileSync(licenseFile, JSON.stringify({ key: key.trim().toUpperCase() }), 'utf8');
-                    return true;
-                } catch (e) {
-                    console.error("Failed to write license file:", e);
-                    return false;
-                }
+        ipcMain.handle('load-sample', () => {
+            try {
+                return fs.readFileSync(path.join(__dirname, 'sample.jpg'));
+            } catch (err) {
+                console.error("Failed to load sample image:", err);
+                return null;
             }
-            return false;
+        });
+        
+        ipcMain.handle('verify-and-save', async (event, key) => {
+            const hwid = await getHardwareID();
+            if (!verifyKey(hwid, key)) return false;
+            try {
+                fs.writeFileSync(licenseFile, JSON.stringify({ key: normalizeKey(key) }), 'utf8');
+                return true;
+            } catch (e) {
+                console.error("Failed to write license file:", e);
+                return false;
+            }
         });
 
         createWindow();

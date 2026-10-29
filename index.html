@@ -3,11 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' blob: data: ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Photo Editor PRO - 專業級線上相片編輯器</title>
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <!-- Lucide Icons -->
     <script src="lucide.min.js"></script>
     <link rel="stylesheet" href="style.css">
@@ -195,7 +192,7 @@
                 <!-- 2. Tone Curve Accordion -->
                 <div class="accordion-item">
                     <button class="accordion-header">
-                        <i data-lucide="bezier-curve" style="transform: scale(0.95)"></i>
+                        <i data-lucide="spline"></i>
                         <span>色調曲線</span>
                         <i class="chevron" data-lucide="chevron-down"></i>
                     </button>
@@ -542,6 +539,18 @@
                             <button class="preset-btn" data-preset="emerald-forest">冷森翠綠</button>
                             <button class="preset-btn" data-preset="cyberpunk">賽博霓虹</button>
                         </div>
+
+                        <!-- User saved presets -->
+                        <div class="custom-presets-section">
+                            <div class="custom-presets-title">我的預設</div>
+                            <div class="custom-preset-save">
+                                <input type="text" id="input-custom-preset-name" class="custom-preset-input" maxlength="20" placeholder="為目前調整命名後儲存" autocomplete="off" aria-label="自訂預設名稱">
+                                <button class="btn btn-secondary btn-sm" id="btn-save-custom-preset" title="將目前的基礎調整與效果儲存為預設" aria-label="儲存自訂預設">
+                                    <i data-lucide="bookmark-plus"></i>
+                                </button>
+                            </div>
+                            <div id="custom-presets-list" class="presets-grid"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -562,13 +571,13 @@
             <header class="toolbar animate-slide-down">
                 <div class="toolbar-left">
 
-                    <button class="btn-icon" id="btn-undo" title="還原 (Ctrl+Z)" disabled>
+                    <button class="btn-icon" id="btn-undo" title="還原 (Ctrl+Z)" aria-label="還原" disabled>
                         <i data-lucide="undo-2"></i>
                     </button>
-                    <button class="btn-icon" id="btn-redo" title="重做 (Ctrl+Y)" disabled>
+                    <button class="btn-icon" id="btn-redo" title="重做 (Ctrl+Y / Ctrl+Shift+Z)" aria-label="重做" disabled>
                         <i data-lucide="redo-2"></i>
                     </button>
-                     <button class="btn-icon" id="btn-reset" title="重設所有調整" disabled>
+                     <button class="btn-icon" id="btn-reset" title="重設所有調整（滑桿、曲線、色彩混合、相框）" aria-label="重設所有調整" disabled>
                         <i data-lucide="rotate-ccw"></i>
                     </button>
                     <button class="btn btn-secondary btn-sm" id="btn-auto-enhance" title="一鍵智能優化" disabled style="padding: 6px 12px; font-size: 0.8rem; height: 32px; display: inline-flex; align-items: center; gap: 6px; border-color: var(--primary); background: rgba(99, 102, 241, 0.1);">
@@ -588,7 +597,7 @@
                         <button class="btn-icon" id="btn-zoom-in" title="放大" disabled>
                             <i data-lucide="zoom-in"></i>
                         </button>
-                        <button class="btn-icon" id="btn-zoom-fit" title="符合視窗" disabled>
+                        <button class="btn-icon" id="btn-zoom-fit" title="符合視窗 / 100% (Ctrl+0)" aria-label="符合視窗" disabled>
                             <i data-lucide="maximize"></i>
                         </button>
                     </div>
@@ -599,11 +608,11 @@
                         <span>裁切旋轉</span>
                     </button>
                     <!-- Compare Toggle Button -->
-                    <button class="btn btn-secondary" id="btn-compare" title="按住可預覽原圖" disabled>
+                    <button class="btn btn-secondary" id="btn-compare" title="按住可預覽原圖（或按住 \ 鍵）" disabled>
                         <i data-lucide="eye"></i>
                         <span>比較原圖</span>
                     </button>
-                    <button class="btn btn-primary" id="btn-download" disabled>
+                    <button class="btn btn-primary" id="btn-download" title="儲存相片 (Ctrl+S)" disabled>
                         <i data-lucide="download"></i>
                         <span>儲存相片</span>
                     </button>
@@ -655,7 +664,7 @@
                             <i data-lucide="image-plus"></i>
                         </div>
                         <h2>上傳您想編輯的相片</h2>
-                        <p>支援 JPG, PNG, WEBP 等格式，將相片拖曳至此處或點擊按鈕選取</p>
+                        <p>支援 JPG, PNG, WEBP 等格式，將相片拖曳至此處、貼上 (Ctrl+V) 或點擊按鈕選取</p>
                         <div class="dropzone-actions" style="display: flex; justify-content: center; gap: 12px; margin-top: 8px;">
                             <button class="btn btn-primary" id="btn-select-file">
                                 <i data-lucide="plus"></i>
@@ -701,9 +710,6 @@
         </main>
     </div>
 
-    <!-- Hidden elements for processing -->
-    <canvas id="source-canvas" style="display: none;"></canvas>
-
     <!-- License Activation Modal Overlay -->
     <div id="license-overlay" class="modal-overlay" style="display: none;">
         <div class="modal-content license-modal animate-scale-in">
@@ -725,7 +731,7 @@
 
                 <div class="license-info-group">
                     <label for="input-license-key">請輸入授權序號 (License Key):</label>
-                    <input type="text" id="input-license-key" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off">
+                    <input type="text" id="input-license-key" placeholder="貼上您的授權序號（XXXXX-XXXXX-XXXXX-…）" autocomplete="off">
                 </div>
 
                 <div id="license-error-msg" class="error-msg" style="display: none;">
@@ -745,6 +751,51 @@
         </div>
     </div>
 
+    <!-- Export Modal Overlay -->
+    <div id="export-overlay" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="export-title">
+        <div class="modal-content export-modal animate-scale-in">
+            <div class="modal-header">
+                <h2 id="export-title">儲存相片</h2>
+                <button class="modal-close" id="btn-close-export" aria-label="關閉">&times;</button>
+            </div>
+            <div class="modal-body export-body">
+                <div class="export-row">
+                    <label for="export-format">檔案格式</label>
+                    <select id="export-format" class="export-select">
+                        <option value="image/jpeg">JPEG（相片，檔案小）</option>
+                        <option value="image/png">PNG（無損，檔案大）</option>
+                        <option value="image/webp">WebP（高壓縮率）</option>
+                    </select>
+                </div>
+                <div class="export-row" id="export-quality-row">
+                    <label for="export-quality">品質 <span class="val-display" id="export-quality-val">92</span></label>
+                    <input type="range" id="export-quality" min="50" max="100" value="92" step="1">
+                </div>
+                <div class="export-row">
+                    <label for="export-scale">輸出大小</label>
+                    <select id="export-scale" class="export-select">
+                        <option value="1">原始尺寸 (100%)</option>
+                        <option value="0.75">75%</option>
+                        <option value="0.5">50%</option>
+                        <option value="0.25">25%</option>
+                    </select>
+                </div>
+                <p class="export-size-info" id="export-size-info"></p>
+            </div>
+            <div class="export-actions">
+                <button class="btn btn-secondary" id="btn-export-cancel">取消</button>
+                <button class="btn btn-secondary" id="btn-export-copy" title="以 PNG 格式複製到剪貼簿">
+                    <i data-lucide="clipboard-copy"></i>
+                    <span>複製</span>
+                </button>
+                <button class="btn btn-primary" id="btn-export-download">
+                    <i data-lucide="download"></i>
+                    <span>下載</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Legal Notice Modal Overlay -->
     <div id="legal-overlay" class="modal-overlay" style="display: none;">
         <div class="modal-content legal-modal animate-scale-in" style="width: 520px; max-height: 85vh; display: flex; flex-direction: column; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 28px; box-shadow: 0 20px 50px rgba(0,0,0,0.6);">
@@ -756,7 +807,7 @@
                 <button class="modal-close" id="btn-close-legal" style="background: transparent; border: none; color: var(--text-muted); font-size: 1.4rem; cursor: pointer; transition: var(--transition-fast);">&times;</button>
             </div>
             <div class="modal-body" style="overflow-y: auto; flex: 1; padding-right: 8px; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
-                <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Photo Editor PRO v1.0.0</h3>
+                <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Photo Editor PRO v1.1.0</h3>
                 <p style="margin-bottom: 16px;">
                     本軟體是一款專為攝影愛好者與專業設計師打造的高級相片編輯器。所有核心影像處理演算法皆採用 <b>Rust</b> 編寫並編譯為 <b>WebAssembly</b> 進行高速硬體加速以提供最優異的性能表現，並使用多層混淆及防逆向工程技術進行完整保護。
                 </p>
@@ -779,8 +830,9 @@
                     <br>
                     • <b>Lucide Icons</b> - Copyright © Lucide Contributors. (ISC License)
                     <br>
-                    • <b>Plus Jakarta Sans</b> - Copyright © Gumpita Rahayu. (OFL)
-                    • <b>Noto Sans TC</b> - Copyright © Google Inc. (OFL)
+                    • <b>Plus Jakarta Sans</b> - Copyright © Gumpita Rahayu. (OFL，隨程式內建，離線可用)
+                    <br>
+                    • 中文字型使用系統內建字型（微軟正黑體 / 蘋方 / Noto Sans CJK 等）
                 </p>
             </div>
             <div class="modal-footer" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 12px; display: flex; justify-content: flex-end;">
@@ -790,9 +842,5 @@
     </div>
 
     <script src="app.js"></script>
-    <script>
-        // Initialize Lucide Icons
-        lucide.createIcons();
-    </script>
 </body>
 </html>

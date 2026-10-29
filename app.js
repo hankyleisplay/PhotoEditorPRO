@@ -125,15 +125,64 @@ const state = {
     isComparing: false,
     
     // Rendering management
-    renderPending: false
+    renderPending: false,
+    blurCache: null,               // Cached blurred copy of previewImageData (sharpen / noise reduction input)
+    outputImageData: null,         // Reusable output buffer for render()
+    presetAnimation: null,         // Active slider animation timer
+    previewRebuildPending: false,
+    previewMaxDim: 1200,                  // Current preview resolution (raised while zoomed in)
+    detailTimer: null,
+    sourceUrl: null,               // Object URL of the loaded file (revoked on replace)
+    
+    // User saved presets (persisted in localStorage)
+    customPresets: {}
 };
 
-// Offscreen Canvas for caching full-resolution adjustments
-const sourceCanvas = document.getElementById('source-canvas');
-const sourceCtx = sourceCanvas.getContext('2d');
-
 // Constants
-const MAX_PREVIEW_DIMENSION = 1200; // Limit preview size for real-time 60fps editing
+const MAX_PREVIEW_DIMENSION = 1200; // Base preview size for real-time 60fps editing
+const MAX_DETAIL_DIMENSION = 2400;  // Upper bound when the preview is re-rendered sharper while zoomed in
+const MAX_EXPORT_PIXELS = 120 * 1000 * 1000; // Safety cap so huge exports do not exhaust canvas memory
+const MAX_EXPORT_SIDE = 16384;               // Chromium canvas side limit
+const MIN_ZOOM = 5;
+const MAX_ZOOM = 800;
+const SLIDER_DEFAULTS = { watermarkSize: 50, watermarkOpacity: 50 };
+const TONE_KEYS = ['exposure', 'contrast', 'temperature', 'tint', 'saturation', 'highlights', 'shadows', 'whites', 'blacks', 'vibrance', 'clarity', 'dehaze'];
+const EFFECT_KEYS = ['sharpening', 'noiseReduction', 'vignette', 'grain'];
+const PRESET_KEYS = [...TONE_KEYS, ...EFFECT_KEYS];
+
+function safeStorageGet(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function safeStorageSet(key, value) {
+    try { localStorage.setItem(key, value); return true; } catch (e) { return false; }
+}
+
+function clamp(v, lo, hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// Small non-blocking notification (replaces alert() for informational messages)
+let toastTimer = null;
+function showToast(message, type = 'info') {
+    let toast = document.getElementById('toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast';
+        toast.setAttribute('role', 'status');
+        toast.setAttribute('aria-live', 'polite');
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.className = `toast show toast-${type}`;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
+}
+
+function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !['range', 'button', 'checkbox'].includes(el.type));
+}
 
 // DOM Elements
 const dropzone = document.getElementById('dropzone');
@@ -215,36 +264,40 @@ const PRESETS = {
  * INITIALIZATION & EVENT LISTENERS
  * ========================================== */
 
-// Browser-based SHA-256 and License Key generation for web fallback
-async function generateBrowserKey(hwid) {
-    const _p1 = "PhotoEditorPRO";
-    const _p2 = "Licensing";
-    const _p3 = "System";
-    const _p4 = "SecretSalt";
-    const _p5 = "2026_@#$!";
-    const salt = [_p1, _p2, _p3, _p4, _p5].join("_");
+// Browser fallback (dev server / web): verifies an Ed25519 license signature with the public key only.
+// Needs a browser with Ed25519 in Web Crypto; the desktop app verifies in the main process instead.
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-    // Phase 1: SHA256 of hwid + salt (lowercase hex format)
-    const msg1 = new TextEncoder().encode(hwid + salt);
-    const buf1 = await crypto.subtle.digest('SHA-256', msg1);
-    const hash1 = Array.from(new Uint8Array(buf1)).map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
-    
-    // Phase 2: Reverse hash1
-    const reversedHash1 = hash1.split('').reverse().join('');
-    
-    // Phase 3: SHA256 of reversedHash1 + salt + hwid (uppercase hex format)
-    const msg2 = new TextEncoder().encode(reversedHash1 + salt + hwid);
-    const buf2 = await crypto.subtle.digest('SHA-256', msg2);
-    const hash2 = Array.from(new Uint8Array(buf2)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-    
-    // Phase 4: Format as XXXXX-XXXXX-XXXXX-XXXXX
-    const cleanHex = hash2.substring(0, 20);
-    let serial = "";
-    for (let i = 0; i < cleanHex.length; i += 5) {
-        if (i > 0) serial += "-";
-        serial += cleanHex.substring(i, i + 5);
+function decodeBase32(text) {
+    let bits = 0, value = 0;
+    const out = [];
+    for (const ch of text) {
+        const idx = BASE32_ALPHABET.indexOf(ch);
+        if (idx < 0) return null;
+        value = (value << 5) | idx;
+        bits += 5;
+        if (bits >= 8) {
+            out.push((value >>> (bits - 8)) & 255);
+            bits -= 8;
+        }
     }
-    return serial;
+    return new Uint8Array(out);
+}
+
+async function verifyBrowserKey(hwid, key) {
+    try {
+        const signature = decodeBase32(String(key).replace(/[\s-]+/g, '').toUpperCase());
+        if (!signature || signature.length !== 64) return false;
+        const response = await fetch('license-public.json', { cache: 'no-store' });
+        if (!response.ok) return false;
+        const { publicKey } = await response.json();
+        const der = Uint8Array.from(atob(publicKey), c => c.charCodeAt(0));
+        const cryptoKey = await crypto.subtle.importKey('spki', der, { name: 'Ed25519' }, false, ['verify']);
+        return await crypto.subtle.verify({ name: 'Ed25519' }, cryptoKey, signature, new TextEncoder().encode(hwid));
+    } catch (e) {
+        console.error('Browser license verification failed:', e);
+        return false;
+    }
 }
 
 // License Validation Flow
@@ -268,9 +321,8 @@ async function checkLicense() {
     } else {
         // Browser Fallback (e.g. development server)
         hwid = "BROWSER-MODE-DEMO-HWID-2026";
-        const savedKey = localStorage.getItem('license_key');
-        const expectedKey = await generateBrowserKey(hwid);
-        isLicensed = (savedKey === expectedKey);
+        const savedKey = safeStorageGet('license_key');
+        isLicensed = !!savedKey && await verifyBrowserKey(hwid, savedKey);
     }
 
     if (isLicensed) {
@@ -283,33 +335,46 @@ async function checkLicense() {
     displayHwid.textContent = hwid;
 
     // Hook up Copy Button
-    btnCopyHwid.addEventListener('click', () => {
-        navigator.clipboard.writeText(hwid);
-        const icon = btnCopyHwid.querySelector('i');
+    btnCopyHwid.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(hwid);
+        } catch (e) {
+            showToast('無法存取剪貼簿，請手動選取識別碼複製', 'error');
+            return;
+        }
+        const icon = btnCopyHwid.querySelector('svg, i');
         if (icon) {
-            icon.setAttribute('data-lucide', 'check');
-            lucide.createIcons();
-            setTimeout(() => {
-                icon.setAttribute('data-lucide', 'copy');
+            const swap = (name) => {
+                btnCopyHwid.innerHTML = `<i data-lucide="${name}" style="width: 16px; height: 16px;"></i>`;
                 lucide.createIcons();
-            }, 2000);
+            };
+            swap('check');
+            setTimeout(() => swap('copy'), 2000);
         }
     });
 
     // Hook up Activate Button
-    btnActivate.addEventListener('click', async () => {
+    let activating = false;
+    const activate = async () => {
+        if (activating) return;
         const key = inputKey.value.trim().toUpperCase();
         if (!key) return;
+        activating = true;
 
         let success = false;
-        if (window.licenseAPI) {
-            success = await window.licenseAPI.verifyAndSave(key);
-        } else {
-            const expectedKey = await generateBrowserKey(hwid);
-            if (key === expectedKey) {
-                localStorage.setItem('license_key', key);
-                success = true;
+        try {
+            if (window.licenseAPI) {
+                success = await window.licenseAPI.verifyAndSave(key);
+            } else {
+                if (await verifyBrowserKey(hwid, key)) {
+                    safeStorageSet('license_key', key);
+                    success = true;
+                }
             }
+        } catch (e) {
+            console.error('License verification failed:', e);
+        } finally {
+            activating = false;
         }
 
         if (success) {
@@ -321,10 +386,15 @@ async function checkLicense() {
             inputKey.classList.add('error-pulse');
             setTimeout(() => inputKey.classList.remove('error-pulse'), 500);
         }
+    };
+    btnActivate.addEventListener('click', activate);
+    inputKey.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') activate();
     });
 }
 
 let wasmExports = null;
+let wasmFailures = 0;
 
 async function initWasm() {
     const progress = document.querySelector('.splash-progress');
@@ -356,7 +426,13 @@ async function initWasm() {
         if (loadingText) loadingText.textContent = '編譯 WebAssembly 元件...';
         
         const result = await WebAssembly.instantiate(wasmBuffer, {});
-        wasmExports = result.instance.exports;
+        const exports = result.instance.exports;
+        if (typeof exports.process_pixels !== 'function' || typeof exports.alloc !== 'function' ||
+            typeof exports.dealloc !== 'function' || !exports.memory) {
+            throw new Error("Wasm module is missing required exports");
+        }
+        wasmExports = exports;
+        requestRender();
         
         console.log("Rust WebAssembly Engine loaded!");
         
@@ -369,12 +445,43 @@ async function initWasm() {
         }
     } catch (err) {
         console.error("Failed to load Wasm, using JS fallback engine:", err);
+        wasmExports = null;
         if (loadingText) loadingText.textContent = 'Wasm 載入失敗，正在使用 JS 引擎...';
         await new Promise(r => setTimeout(r, 800));
         if (splash) {
             splash.classList.add('fade-out');
         }
     }
+}
+
+/* ---- Slider UI helpers ---- */
+
+function formatSliderValue(input, val) {
+    if (typeof val !== 'number') return String(val);
+    // Unsigned sliders (min >= 0) are shown without a leading "+"
+    const unsigned = parseFloat(input.min) >= 0;
+    return (!unsigned && val > 0) ? `+${val}` : String(val);
+}
+
+function setSliderUI(key, val) {
+    const input = inputs[key];
+    if (!input) return;
+    input.value = val;
+    if (input.type === 'range') {
+        const sliderControl = input.closest('.slider-control');
+        const valDisplay = sliderControl ? sliderControl.querySelector('.val-display') : null;
+        if (valDisplay) valDisplay.textContent = formatSliderValue(input, val);
+    }
+}
+
+function getPresetButtons() {
+    return document.querySelectorAll('.preset-btn');
+}
+
+function getPresetDefinition(name) {
+    if (PRESETS[name]) return PRESETS[name];
+    if (name && name.startsWith('my:')) return state.customPresets[name.slice(3)] || null;
+    return null;
 }
 
 function setupPresetIntensity() {
@@ -388,35 +495,26 @@ function setupPresetIntensity() {
                 applyPresetWithIntensity(state.activePreset, state.presetIntensity);
             }
         });
+        inputIntensity.addEventListener('change', () => {
+            if (state.originalImage) saveHistoryState();
+        });
     }
 }
 
 function applyPresetWithIntensity(presetName, intensity) {
-    if (!state.originalImage || !PRESETS[presetName]) return;
+    const targetPreset = getPresetDefinition(presetName);
+    if (!state.originalImage || !targetPreset) return;
+    cancelPresetAnimation();
     state.activePreset = presetName;
     
-    const targetPreset = PRESETS[presetName];
     const blended = {};
-    
-    const keys = ['exposure', 'contrast', 'temperature', 'tint', 'saturation', 'highlights', 'shadows', 'whites', 'blacks', 'vibrance', 'clarity', 'dehaze', 'sharpening', 'noiseReduction', 'vignette', 'grain'];
-    
-    keys.forEach(key => {
+    PRESET_KEYS.forEach(key => {
         const targetVal = targetPreset[key] !== undefined ? targetPreset[key] : 0;
         blended[key] = Math.round(targetVal * (intensity / 100));
     });
     
-    state.adjustments = { ...state.adjustments, ...blended };
-    
-    Object.keys(blended).forEach(key => {
-        if (inputs[key]) {
-            inputs[key].value = blended[key];
-            const sliderControl = inputs[key].closest('.slider-control');
-            const valDisplay = sliderControl ? sliderControl.querySelector('.val-display') : null;
-            if (valDisplay) {
-                valDisplay.textContent = blended[key] > 0 ? `+${blended[key]}` : blended[key];
-            }
-        }
-    });
+    Object.assign(state.adjustments, blended);
+    Object.keys(blended).forEach(key => setSliderUI(key, blended[key]));
     
     requestRender();
 }
@@ -425,41 +523,38 @@ function setupAutoEnhance() {
     const btnAutoEnhance = document.getElementById('btn-auto-enhance');
     if (btnAutoEnhance) {
         btnAutoEnhance.addEventListener('click', () => {
-            if (!state.originalImage) return;
+            if (!state.originalImage || !state.previewImageData) return;
             
             // Analyze the preview image data
             const data = state.previewImageData.data;
             const len = data.length;
             
             let sumLuminance = 0;
+            let sampleCount = 0;
             const buckets = new Uint32Array(256);
             
-            // Sample every 64th pixel for performance
-            for (let i = 0; i < len; i += 64) {
-                const r = data[i];
-                const g = data[i+1];
-                const b = data[i+2];
-                const y = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+            // Sample every 16th pixel for performance
+            for (let i = 0; i + 2 < len; i += 64) {
+                const y = Math.round(0.2126 * data[i] + 0.7152 * data[i+1] + 0.0722 * data[i+2]);
                 sumLuminance += y;
                 buckets[y]++;
+                sampleCount++;
             }
+            if (sampleCount === 0) return;
             
-            const sampleCount = len / 64;
             const avgLuminance = sumLuminance / sampleCount;
             
+            // 10th / 90th luminance percentiles (-1 = not found yet, so a black level of 0 is handled correctly)
             let count = 0;
-            let shadowThreshold = 0;
-            let highlightThreshold = 255;
-            
+            let shadowThreshold = -1;
+            let highlightThreshold = -1;
             for (let i = 0; i < 256; i++) {
                 count += buckets[i];
-                if (count >= sampleCount * 0.1 && shadowThreshold === 0) {
-                    shadowThreshold = i;
-                }
-                if (count >= sampleCount * 0.9 && highlightThreshold === 255) {
-                    highlightThreshold = i;
-                }
+                if (shadowThreshold < 0 && count >= sampleCount * 0.1) shadowThreshold = i;
+                if (highlightThreshold < 0 && count >= sampleCount * 0.9) highlightThreshold = i;
             }
+            if (shadowThreshold < 0) shadowThreshold = 0;
+            if (highlightThreshold < 0) highlightThreshold = 255;
             
             let autoExposure = 0;
             if (avgLuminance < 110) {
@@ -467,7 +562,7 @@ function setupAutoEnhance() {
             } else if (avgLuminance > 140) {
                 autoExposure = Math.round((125 - avgLuminance) * 0.3);
             }
-            autoExposure = Math.max(-30, Math.min(40, autoExposure));
+            autoExposure = clamp(autoExposure, -30, 40);
             
             const dynamicRange = highlightThreshold - shadowThreshold;
             let autoContrast = 0;
@@ -476,35 +571,37 @@ function setupAutoEnhance() {
             } else {
                 autoContrast = 10;
             }
-            autoContrast = Math.max(0, Math.min(40, autoContrast));
+            autoContrast = clamp(autoContrast, 0, 40);
             
             let autoShadows = 0;
             if (shadowThreshold < 30) {
                 autoShadows = Math.round((30 - shadowThreshold) * 1.2);
             }
-            autoShadows = Math.max(0, Math.min(50, autoShadows));
+            autoShadows = clamp(autoShadows, 0, 50);
             
             let autoHighlights = 0;
             if (highlightThreshold > 220) {
                 autoHighlights = -Math.round((highlightThreshold - 220) * 0.8);
             }
-            autoHighlights = Math.max(-50, Math.min(0, autoHighlights));
-            
-            const autoSaturation = 8;
-            const autoVibrance = 15;
+            autoHighlights = clamp(autoHighlights, -50, 0);
             
             const targets = {
                 exposure: autoExposure,
                 contrast: autoContrast,
                 shadows: autoShadows,
                 highlights: autoHighlights,
-                saturation: autoSaturation,
-                vibrance: autoVibrance,
+                saturation: 8,
+                vibrance: 15,
                 whites: 5,
                 blacks: -5
             };
             
-            animateSlidersTo(targets);
+            // Auto enhance only touches tone & presence; colour balance, clarity, dehaze and effects are kept
+            state.activePreset = 'custom';
+            clearPresetHighlights();
+            animateSlidersTo(targets, {
+                keepKeys: ['temperature', 'tint', 'clarity', 'dehaze', ...EFFECT_KEYS]
+            });
             
             btnAutoEnhance.classList.add('btn-auto-enhance-active');
             setTimeout(() => {
@@ -514,16 +611,135 @@ function setupAutoEnhance() {
     }
 }
 
+function setActiveFrame(frame) {
+    state.activeFrame = frame || 'none';
+    document.querySelectorAll('.frame-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.frame === state.activeFrame);
+    });
+}
+
 function setupFrames() {
     const frameBtns = document.querySelectorAll('.frame-btn');
     frameBtns.forEach(btn => {
         btn.addEventListener('click', () => {
-            frameBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            state.activeFrame = btn.dataset.frame;
+            if (!state.originalImage) return;
+            setActiveFrame(btn.dataset.frame);
             saveHistoryState();
             requestRender();
         });
+    });
+}
+
+/* ---- Custom (user saved) presets ---- */
+
+const CUSTOM_PRESET_STORAGE_KEY = 'pep_custom_presets';
+const MAX_CUSTOM_PRESETS = 24;
+
+function loadCustomPresets() {
+    try {
+        const raw = safeStorageGet(CUSTOM_PRESET_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const clean = {};
+        if (parsed && typeof parsed === 'object') {
+            Object.keys(parsed).slice(0, MAX_CUSTOM_PRESETS).forEach(name => {
+                const src = parsed[name];
+                if (!src || typeof src !== 'object') return;
+                const preset = {};
+                PRESET_KEYS.forEach(k => {
+                    const v = Number(src[k]);
+                    preset[k] = Number.isFinite(v) ? clamp(Math.round(v), -100, 100) : 0;
+                });
+                clean[String(name).slice(0, 20)] = preset;
+            });
+        }
+        state.customPresets = clean;
+    } catch (e) {
+        state.customPresets = {};
+    }
+}
+
+function persistCustomPresets() {
+    return safeStorageSet(CUSTOM_PRESET_STORAGE_KEY, JSON.stringify(state.customPresets));
+}
+
+function renderCustomPresets() {
+    const list = document.getElementById('custom-presets-list');
+    if (!list) return;
+    list.textContent = '';
+    const names = Object.keys(state.customPresets);
+    if (names.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'custom-presets-empty';
+        empty.textContent = '尚未儲存任何自訂預設';
+        list.appendChild(empty);
+        return;
+    }
+    names.forEach(name => {
+        const row = document.createElement('div');
+        row.className = 'custom-preset-row';
+        
+        const btn = document.createElement('button');
+        btn.className = 'preset-btn';
+        btn.dataset.preset = `my:${name}`;
+        btn.textContent = name;
+        btn.title = name;
+        if (state.activePreset === `my:${name}`) btn.classList.add('active');
+        btn.addEventListener('click', () => applyPreset(`my:${name}`));
+        
+        const del = document.createElement('button');
+        del.className = 'custom-preset-delete';
+        del.title = `刪除「${name}」`;
+        del.setAttribute('aria-label', `刪除預設 ${name}`);
+        del.textContent = '×';
+        del.addEventListener('click', () => {
+            delete state.customPresets[name];
+            persistCustomPresets();
+            if (state.activePreset === `my:${name}`) state.activePreset = 'custom';
+            renderCustomPresets();
+        });
+        
+        row.appendChild(btn);
+        row.appendChild(del);
+        list.appendChild(row);
+    });
+}
+
+function setupCustomPresets() {
+    loadCustomPresets();
+    renderCustomPresets();
+    
+    const nameInput = document.getElementById('input-custom-preset-name');
+    const btnSave = document.getElementById('btn-save-custom-preset');
+    if (!nameInput || !btnSave) return;
+    
+    const save = () => {
+        if (!state.originalImage) {
+            showToast('請先載入相片再儲存預設', 'error');
+            return;
+        }
+        const name = nameInput.value.trim().slice(0, 20);
+        if (!name) {
+            nameInput.focus();
+            return;
+        }
+        const isNew = !(name in state.customPresets);
+        if (isNew && Object.keys(state.customPresets).length >= MAX_CUSTOM_PRESETS) {
+            showToast(`最多只能儲存 ${MAX_CUSTOM_PRESETS} 個自訂預設`, 'error');
+            return;
+        }
+        const preset = {};
+        PRESET_KEYS.forEach(k => { preset[k] = Number(state.adjustments[k]) || 0; });
+        state.customPresets[name] = preset;
+        if (!persistCustomPresets()) showToast('瀏覽器禁止儲存資料，預設僅在本次使用有效', 'error');
+        else showToast(`已儲存預設「${name}」`, 'success');
+        nameInput.value = '';
+        state.activePreset = `my:${name}`;
+        clearPresetHighlights();
+        renderCustomPresets();
+    };
+    btnSave.addEventListener('click', save);
+    nameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') save();
     });
 }
 
@@ -571,6 +787,7 @@ function init() {
     initWasm();
 
     setupDragAndDrop();
+    setupPasteImport();
     setupFileInputs();
     setupSliders();
     setupToolbar();
@@ -587,43 +804,75 @@ function init() {
     setupPresetIntensity();
     setupAutoEnhance();
     setupFrames();
+    setupCustomPresets();
+    setupExportDialog();
     setupLegalModal();
 
     recomputeAllCurveLUTs();
+    if (window.lucide) lucide.createIcons();
 }
 
 // Drag & Drop Setup
+// Listens on the whole window: an image dropped anywhere replaces the current photo, and a drop
+// outside the dropzone no longer makes the Electron window navigate to the dropped file.
 function setupDragAndDrop() {
-    const handleDragOver = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dropzone.classList.add('dragover');
+    let dragDepth = 0;
+    const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    const setDragging = (on) => {
+        dropzone.classList.toggle('dragover', on);
+        document.body.classList.toggle('drag-active', on);
     };
     
-    const handleDragLeave = (e) => {
+    window.addEventListener('dragenter', (e) => {
+        if (!hasFiles(e)) return;
         e.preventDefault();
-        e.stopPropagation();
-        dropzone.classList.remove('dragover');
-    };
+        dragDepth++;
+        setDragging(true);
+    });
     
-    const handleDrop = (e) => {
+    window.addEventListener('dragover', (e) => {
+        if (!hasFiles(e)) return;
         e.preventDefault();
-        e.stopPropagation();
-        dropzone.classList.remove('dragover');
+        e.dataTransfer.dropEffect = 'copy';
+    });
+    
+    window.addEventListener('dragleave', (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) setDragging(false);
+    });
+    
+    window.addEventListener('drop', (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth = 0;
+        setDragging(false);
         
-        const files = e.dataTransfer.files;
-        if (files.length > 0) {
-            handleImageFile(files[0]);
+        const files = Array.from(e.dataTransfer.files || []);
+        const imageFile = files.find(isImageFile);
+        if (imageFile) {
+            handleImageFile(imageFile);
+        } else if (files.length > 0) {
+            showToast('請拖曳有效的相片檔案（JPG、PNG、WebP 等）', 'error');
         }
-    };
-
-    dropzone.addEventListener('dragover', handleDragOver);
-    dropzone.addEventListener('dragenter', handleDragOver);
-    dropzone.addEventListener('dragleave', handleDragLeave);
-    dropzone.addEventListener('drop', handleDrop);
+    });
     
     // Clicking dropzone opens file dialog
     dropzone.addEventListener('click', () => fileInput.click());
+}
+
+// Paste an image straight from the clipboard (Ctrl+V)
+function setupPasteImport() {
+    window.addEventListener('paste', (e) => {
+        const items = e.clipboardData ? Array.from(e.clipboardData.items || []) : [];
+        const item = items.find(it => it.kind === 'file' && it.type.startsWith('image/'));
+        if (!item) return;
+        const file = item.getAsFile();
+        if (!file) return;
+        e.preventDefault();
+        handleImageFile(file, 'pasted-image');
+    });
 }
 
 // File Inputs Setup
@@ -649,25 +898,33 @@ function setupFileInputs() {
         if (e.target.files.length > 0) {
             handleImageFile(e.target.files[0]);
         }
+        // Allow picking the same file again later
+        fileInput.value = '';
     });
 }
 
-function loadSampleImage() {
+async function loadSampleImage() {
     showLoading(true);
-    state.originalFileName = 'sample-landscape';
-    state.originalFormat = 'image/jpeg';
-    
-    const img = new Image();
-    img.onload = () => {
-        setupImages(img);
-    };
-    img.onerror = (err) => {
-        showLoading(false);
+    try {
+        let blob;
+        if (window.sampleAPI) {
+            // Electron: bytes come from the main process (file:// images would taint the canvas)
+            const bytes = await window.sampleAPI.loadSample();
+            if (!bytes) throw new Error('sample not available');
+            blob = new Blob([bytes], { type: 'image/jpeg' });
+        } else {
+            const response = await fetch('./sample.jpg');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            blob = await response.blob();
+        }
+        await handleImageFile(new File([blob], 'sample-landscape.jpg', { type: 'image/jpeg' }));
+    } catch (err) {
         console.error(err);
-        alert('無法載入範例圖片！');
-    };
-    img.src = './sample.jpg';
+        showLoading(false);
+        showToast('無法載入範例圖片！', 'error');
+    }
 }
+
 // Setup Slider Change Listeners
 function setupSliders() {
     Object.keys(inputs).forEach(key => {
@@ -690,6 +947,7 @@ function setupSliders() {
             }
             
             state.adjustments[key] = val;
+            cancelPresetAnimation();
             
             // Remove active preset highlight because we tweaked manual sliders
             if (state.activePreset !== 'custom') {
@@ -705,6 +963,19 @@ function setupSliders() {
             input.addEventListener('change', () => {
                 saveHistoryState();
             });
+            
+            // Double-click a slider (or its label) to reset just that control
+            const resetOne = () => {
+                if (!state.originalImage) return;
+                const defVal = SLIDER_DEFAULTS[key] !== undefined ? SLIDER_DEFAULTS[key] : 0;
+                if (parseInt(input.value) === defVal) return;
+                input.value = defVal;
+                updateValue();
+                saveHistoryState();
+            };
+            input.addEventListener('dblclick', resetOne);
+            const label = sliderControl ? sliderControl.querySelector('label') : null;
+            if (label) label.addEventListener('dblclick', resetOne);
         } else {
             // Text inputs, select elements, etc.
             input.addEventListener('input', updateValue);
@@ -724,13 +995,28 @@ function setupPresetButtons() {
     });
 }
 
+// Hold-to-compare (button or the backslash key): shows the untouched preview while held
+function startCompare() {
+    if (!state.originalImage || state.isCropMode || state.isComparing) return;
+    state.isComparing = true;
+    btnCompare.classList.add('active');
+    requestRender();
+}
+
+function stopCompare() {
+    if (!state.isComparing) return;
+    state.isComparing = false;
+    btnCompare.classList.remove('active');
+    requestRender();
+}
+
 // Toolbar Setup (Undo, Redo, Zoom, Download, Reset)
 function setupToolbar() {
     btnUndo.addEventListener('click', undo);
     btnRedo.addEventListener('click', redo);
     
-    btnZoomIn.addEventListener('click', () => adjustZoom(20));
-    btnZoomOut.addEventListener('click', () => adjustZoom(-20));
+    btnZoomIn.addEventListener('click', () => adjustZoom(1.25));
+    btnZoomOut.addEventListener('click', () => adjustZoom(1 / 1.25));
     btnZoomFit.addEventListener('click', toggleZoomFit);
     
     if (btnReset) {
@@ -738,20 +1024,6 @@ function setupToolbar() {
     }
     
     // Compare Button (Hold down to see original image)
-    const startCompare = () => {
-        if (!state.originalImage) return;
-        state.isComparing = true;
-        btnCompare.classList.add('active');
-        requestRender();
-    };
-
-    const stopCompare = () => {
-        if (!state.originalImage) return;
-        state.isComparing = false;
-        btnCompare.classList.remove('active');
-        requestRender();
-    };
-
     btnCompare.addEventListener('mousedown', startCompare);
     btnCompare.addEventListener('mouseup', stopCompare);
     btnCompare.addEventListener('mouseleave', stopCompare);
@@ -765,6 +1037,7 @@ function setupToolbar() {
         e.preventDefault();
         stopCompare();
     });
+    window.addEventListener('blur', stopCompare);
 
     btnDownload.addEventListener('click', downloadHighResImage);
 
@@ -773,13 +1046,15 @@ function setupToolbar() {
     window.addEventListener('mousemove', panImage);
     window.addEventListener('mouseup', stopPanning);
     
-    // Mouse wheel zoom
-    canvasWrapper.addEventListener('wheel', (e) => {
+    // Mouse wheel zoom (towards the cursor). Listening on the whole viewport so the area around the
+    // image works too; trackpad pinch (ctrl+wheel) and mouse wheel both end up here.
+    document.getElementById('viewport').addEventListener('wheel', (e) => {
         if (!state.originalImage) return;
         e.preventDefault();
         
-        const zoomFactor = e.deltaY < 0 ? 10 : -10;
-        adjustZoom(zoomFactor);
+        const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        const factor = Math.exp(-clamp(delta, -120, 120) * (e.ctrlKey ? 0.01 : 0.0015));
+        adjustZoom(factor, e.clientX, e.clientY);
     }, { passive: false });
 }
 
@@ -793,33 +1068,72 @@ function setupWindowEvents() {
 
     // Keyboard Shortcuts
     window.addEventListener('keydown', (e) => {
+        const mod = e.ctrlKey || e.metaKey;
+        const key = (e.key || '').toLowerCase();
+        const typing = isTypingTarget(e.target);
+        
+        // Modal dialogs: Escape closes them, everything else is left alone
+        const openModal = Array.from(document.querySelectorAll('.modal-overlay'))
+            .find(m => m.id !== 'license-overlay' && m.style.display !== 'none');
+        if (openModal) {
+            if (key === 'escape') {
+                const closeBtn = openModal.querySelector('.modal-close, #btn-export-cancel');
+                if (closeBtn) closeBtn.click();
+            }
+            return;
+        }
+        if (document.getElementById('license-overlay').style.display === 'flex') return;
+        
+        // Ctrl+O: open a photo (works before an image is loaded)
+        if (mod && key === 'o') {
+            e.preventDefault();
+            fileInput.click();
+            return;
+        }
+        
         if (!state.originalImage) return;
-
-        // Ctrl + Z
-        if (e.ctrlKey && e.key === 'z') {
-            e.preventDefault();
-            undo();
+        
+        // Crop mode: Enter applies, Escape cancels
+        if (state.isCropMode && !typing) {
+            if (key === 'enter') { e.preventDefault(); exitCropMode(true); return; }
+            if (key === 'escape') { e.preventDefault(); exitCropMode(false); return; }
         }
-        // Ctrl + Y
-        if (e.ctrlKey && e.key === 'y') {
-            e.preventDefault();
-            redo();
+        
+        if (mod) {
+            // While typing in a text field Ctrl+Z / Ctrl+Y belong to the field itself
+            if (key === 'z' && !typing) {
+                e.preventDefault();
+                if (e.shiftKey) redo(); else undo();
+            } else if (key === 'y' && !typing) {
+                e.preventDefault();
+                redo();
+            } else if (key === 's') {
+                e.preventDefault();
+                downloadHighResImage();
+            } else if (key === '0') {
+                e.preventDefault();
+                toggleZoomFit();
+            } else if (key === '=' || key === '+') {
+                e.preventDefault();
+                adjustZoom(1.25);
+            } else if (key === '-') {
+                e.preventDefault();
+                adjustZoom(1 / 1.25);
+            }
+            return;
         }
-        // Ctrl + 0 (Fit zoom)
-        if (e.ctrlKey && e.key === '0') {
+        
+        if (typing || e.repeat) return;
+        
+        // Hold the backslash key to compare with the original
+        if (e.key === '\\') {
             e.preventDefault();
-            toggleZoomFit();
+            startCompare();
         }
-        // Ctrl + = or Ctrl + + (Zoom In)
-        if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
-            e.preventDefault();
-            adjustZoom(25);
-        }
-        // Ctrl + - (Zoom Out)
-        if (e.ctrlKey && e.key === '-') {
-            e.preventDefault();
-            adjustZoom(-25);
-        }
+    });
+    
+    window.addEventListener('keyup', (e) => {
+        if (e.key === '\\') stopCompare();
     });
 }
 
@@ -827,33 +1141,70 @@ function setupWindowEvents() {
  * CORE IMAGE LOADING
  * ========================================== */
 
-function handleImageFile(file) {
-    if (!file.type.startsWith('image/')) {
-        alert('請上傳有效的相片檔案！');
+function isImageFile(file) {
+    if (!file) return false;
+    return (file.type && file.type.startsWith('image/')) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(file.name || '');
+}
+
+async function decodeImageFile(file) {
+    // ImageBitmap decodes off the main thread and honours EXIF orientation
+    if (typeof createImageBitmap === 'function') {
+        try {
+            return await createImageBitmap(file);
+        } catch (e) {
+            // fall through to <img> decoding
+        }
+    }
+    const url = URL.createObjectURL(file);
+    try {
+        return await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('decode failed'));
+            img.src = url;
+        });
+    } finally {
+        // The decoded <img> keeps its own pixel data; the URL is no longer needed
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+}
+
+let imageLoadToken = 0;
+
+async function handleImageFile(file, fallbackName) {
+    if (!isImageFile(file)) {
+        showToast('請上傳有效的相片檔案！', 'error');
         return;
     }
 
+    const token = ++imageLoadToken;
     showLoading(true);
     
-    state.originalFileName = file.name.substring(0, file.name.lastIndexOf('.')) || 'edited-photo';
-    state.originalFormat = file.type;
-    
-    const reader = new FileReader();
-    reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-            setupImages(img);
-        };
-        img.onerror = () => {
-            showLoading(false);
-            alert('載入圖片時出錯！');
-        };
-        img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+    try {
+        const img = await decodeImageFile(file);
+        if (token !== imageLoadToken) return; // a newer load superseded this one
+        if (!img.width || !img.height) throw new Error('empty image');
+        
+        const dot = file.name ? file.name.lastIndexOf('.') : -1;
+        state.originalFileName = (dot > 0 ? file.name.substring(0, dot) : file.name) || fallbackName || 'edited-photo';
+        state.originalFormat = file.type || 'image/png';
+        setupImages(img);
+    } catch (err) {
+        if (token !== imageLoadToken) return;
+        console.error(err);
+        showLoading(false);
+        showToast('載入圖片時出錯，檔案可能已損毀或格式不支援', 'error');
+    }
 }
 
 function setupImages(img) {
+    cancelPresetAnimation();
+    
+    // Release the previous source bitmap
+    if (state.originalImage && state.originalImage !== img && typeof state.originalImage.close === 'function') {
+        state.originalImage.close();
+    }
+    
     state.originalImage = img;
     state.width = img.width;
     state.height = img.height;
@@ -870,68 +1221,33 @@ function setupImages(img) {
     document.getElementById('crop-toolbar').style.display = 'none';
     document.getElementById('crop-overlay-container').style.display = 'none';
     document.getElementById('btn-crop-toggle').classList.remove('active');
-    document.getElementById('input-straighten').value = 0;
-    document.getElementById('straighten-val').textContent = '0°';
+    syncStraightenUI();
     document.getElementById('crop-aspect').value = 'free';
     
     // Reset Curves
-    state.curves = {
-        rgb: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
-        red: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
-        green: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
-        blue: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
-    };
-    state.activeCurveChannel = 'rgb';
-    state.selectedCurvePoint = -1;
-    recomputeAllCurveLUTs();
+    resetCurvesState();
     
     // Reset HSL
-    state.hsl = {
-        hue: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 },
-        saturation: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 },
-        luminance: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 }
-    };
-    state.activeHslTab = 'hue';
-    document.querySelectorAll('.hsl-tab-btn').forEach(btn => btn.classList.remove('active'));
-    const defaultHslTab = document.querySelector('.hsl-tab-btn[data-tab="hue"]');
-    if (defaultHslTab) defaultHslTab.classList.add('active');
-    updateHslSlidersUI();
+    resetHslState();
     
-    // Calculate preview size (bound within MAX_PREVIEW_DIMENSION)
-    let pWidth = img.width;
-    let pHeight = img.height;
-    if (pWidth > MAX_PREVIEW_DIMENSION || pHeight > MAX_PREVIEW_DIMENSION) {
-        if (pWidth > pHeight) {
-            pHeight = Math.round((pHeight * MAX_PREVIEW_DIMENSION) / pWidth);
-            pWidth = MAX_PREVIEW_DIMENSION;
-        } else {
-            pWidth = Math.round((pWidth * MAX_PREVIEW_DIMENSION) / pHeight);
-            pHeight = MAX_PREVIEW_DIMENSION;
-        }
-    }
+    // Reset preset intensity
+    state.presetIntensity = 100;
+    const inputIntensity = document.getElementById('input-preset-intensity');
+    const intensityVal = document.getElementById('preset-intensity-val');
+    if (inputIntensity) inputIntensity.value = 100;
+    if (intensityVal) intensityVal.textContent = '100';
     
-    state.previewWidth = pWidth;
-    state.previewHeight = pHeight;
-    
-    // Initialize Offscreen Preview Canvas
-    state.previewCanvas = document.createElement('canvas');
-    state.previewCanvas.width = pWidth;
-    state.previewCanvas.height = pHeight;
-    state.previewCtx = state.previewCanvas.getContext('2d');
-    state.previewCtx.drawImage(img, 0, 0, pWidth, pHeight);
-    
-    // Cache raw preview image data for speed
-    state.previewImageData = state.previewCtx.getImageData(0, 0, pWidth, pHeight);
-    
-    // Set up viewport editor canvas dimensions
-    state.editorCanvas.width = pWidth;
-    state.editorCanvas.height = pHeight;
-    
-    // Display Dimensions Info
-    dimensionsDisplay.textContent = `${state.width} × ${state.height} px`;
-    
-    // Reset all adjustments
+    // Reset all adjustments & frame
     resetAdjustmentsState();
+    setActiveFrame('none');
+    
+    // Build the (down-scaled) preview canvas and everything cached from it
+    state.isComparing = false;
+    state.zoom = 100;
+    state.pan = { x: 0, y: 0 };
+    state.previewMaxDim = MAX_PREVIEW_DIMENSION;
+    clearTimeout(state.detailTimer);
+    rebuildPreview();
     
     // History setup
     state.history = [];
@@ -957,22 +1273,50 @@ function setupImages(img) {
     const btnAutoEnhance = document.getElementById('btn-auto-enhance');
     if (btnAutoEnhance) btnAutoEnhance.disabled = false;
     
-    // Reset selected frame
-    state.activeFrame = 'none';
-    const frameBtns = document.querySelectorAll('.frame-btn');
-    frameBtns.forEach(btn => {
-        if (btn.dataset.frame === 'none') {
-            btn.classList.add('active');
-        } else {
-            btn.classList.remove('active');
-        }
-    });
-    
-    // Adjust layout zoom
+    // Adjust layout zoom (the editor container is visible now, so it has a real size)
     fitImageToViewport();
     
     showLoading(false);
     requestRender();
+}
+
+function resetCurvesState() {
+    state.curves = {
+        rgb: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+        red: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+        green: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+        blue: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
+    };
+    state.activeCurveChannel = 'rgb';
+    state.selectedCurvePoint = -1;
+    document.querySelectorAll('.curve-chan-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.channel === 'rgb');
+    });
+    recomputeAllCurveLUTs();
+    drawCurveEditor();
+}
+
+function resetHslState() {
+    state.hsl = {
+        hue: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 },
+        saturation: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 },
+        luminance: { red: 0, orange: 0, yellow: 0, green: 0, aqua: 0, blue: 0, purple: 0, magenta: 0 }
+    };
+    state.activeHslTab = 'hue';
+    document.querySelectorAll('.hsl-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === 'hue');
+    });
+    const hslList = document.querySelector('.hsl-sliders-list');
+    if (hslList) hslList.dataset.activeTab = 'hue';
+    updateHslSlidersUI();
+}
+
+function syncStraightenUI() {
+    const slider = document.getElementById('input-straighten');
+    const display = document.getElementById('straighten-val');
+    const val = state.cropTransform.straighten;
+    if (slider) slider.value = val;
+    if (display) display.textContent = `${val > 0 ? '+' : ''}${val}°`;
 }
 
 /* ==========================================
@@ -980,12 +1324,13 @@ function setupImages(img) {
  * ========================================== */
 
 function applyPreset(presetName) {
-    if (!state.originalImage || !PRESETS[presetName]) return;
+    const preset = getPresetDefinition(presetName);
+    if (!state.originalImage || !preset) return;
     state.activePreset = presetName;
     
     // Highlight the active preset button
     clearPresetHighlights();
-    const activeBtn = Array.from(presetButtons).find(btn => btn.dataset.preset === presetName);
+    const activeBtn = Array.from(getPresetButtons()).find(btn => btn.dataset.preset === presetName);
     if (activeBtn) activeBtn.classList.add('active');
     
     // Reset intensity slider to 100
@@ -998,11 +1343,11 @@ function applyPreset(presetName) {
     }
     
     // Smoothly animate sliders to preset values for premium UX feel
-    animateSlidersTo(PRESETS[presetName]);
+    animateSlidersTo(preset);
 }
 
 function clearPresetHighlights() {
-    presetButtons.forEach(btn => btn.classList.remove('active'));
+    getPresetButtons().forEach(btn => btn.classList.remove('active'));
 }
 function resetAdjustmentsState() {
     state.adjustments = {
@@ -1043,31 +1388,22 @@ function resetAdjustmentsState() {
     Object.keys(inputs).forEach(key => {
         const input = inputs[key];
         if (!input) return;
-        
-        if (input.type === 'range') {
-            const defVal = (key === 'watermarkSize' || key === 'watermarkOpacity') ? 50 : 0;
-            input.value = defVal;
-            const sliderControl = input.closest('.slider-control');
-            const valDisplay = sliderControl ? sliderControl.querySelector('.val-display') : null;
-            if (valDisplay) {
-                valDisplay.textContent = String(defVal);
-            }
-        } else if (input.tagName === 'SELECT') {
-            if (key === 'watermarkColor') input.value = '#ffffff';
-            else if (key === 'watermarkPosition') input.value = 'bottom-right';
-        } else if (input.type === 'text') {
-            input.value = '';
-        }
+        setSliderUI(key, state.adjustments[key]);
     });
     
     clearPresetHighlights();
-    const origBtn = Array.from(presetButtons).find(btn => btn.dataset.preset === 'original');
+    const origBtn = Array.from(getPresetButtons()).find(btn => btn.dataset.preset === 'original');
     if (origBtn) origBtn.classList.add('active');
 }
 function resetAdjustments() {
     if (!state.originalImage) return;
     
+    cancelPresetAnimation();
+    // "Reset all": sliders, curves, HSL mixer and frame (crop / rotation is kept, it has its own cancel)
     resetAdjustmentsState();
+    resetCurvesState();
+    resetHslState();
+    setActiveFrame('none');
     saveHistoryState();
     requestRender();
 }
@@ -1087,7 +1423,7 @@ function requestRender() {
 }
 
 function render() {
-    if (!state.originalImage) return;
+    if (!state.originalImage || !state.previewImageData) return;
     
     // If comparing mode, render original preview image directly
     if (state.isComparing) {
@@ -1096,20 +1432,20 @@ function render() {
         return;
     }
     
-    // Get target imageData container
-    const outputImageData = state.editorCtx.createImageData(state.previewWidth, state.previewHeight);
+    const w = state.previewWidth;
+    const h = state.previewHeight;
     
-    // Generate pre-blurred data if sharpening or noise reduction is active
-    let blurredData = null;
-    if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = state.previewWidth;
-        tempCanvas.height = state.previewHeight;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.filter = 'blur(1.5px)';
-        tempCtx.drawImage(state.previewCanvas, 0, 0);
-        blurredData = tempCtx.getImageData(0, 0, state.previewWidth, state.previewHeight).data;
+    // Reuse the output buffer between frames (avoids allocating several MB per slider tick)
+    if (!state.outputImageData || state.outputImageData.width !== w || state.outputImageData.height !== h) {
+        state.outputImageData = state.editorCtx.createImageData(w, h);
     }
+    const outputImageData = state.outputImageData;
+    
+    // Pre-blurred data is only needed for sharpening / noise reduction. It depends only on the
+    // preview image, so it is computed once and cached until the preview changes.
+    const blurredData = (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0)
+        ? getBlurredPreview()
+        : null;
     
     // Apply adjustment filter pipeline
     applyFilterPipeline(
@@ -1124,16 +1460,36 @@ function render() {
     
     // Draw watermark if configured
     if (state.adjustments.watermarkText) {
-        drawWatermark(state.editorCtx, state.previewWidth, state.previewHeight, state.adjustments);
+        drawWatermark(state.editorCtx, w, h, state.adjustments);
     }
     
     // Draw artistic frame if configured
     if (state.activeFrame && state.activeFrame !== 'none') {
-        drawFrame(state.editorCtx, state.previewWidth, state.previewHeight, state.activeFrame);
+        drawFrame(state.editorCtx, w, h, state.activeFrame);
     }
     
     // Update live histogram
     drawHistogram(outputImageData);
+}
+
+// Blur used as the low-pass reference for sharpening / noise reduction.
+function getBlurData(sourceCanvas, radius) {
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+    const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+    tempCtx.filter = `blur(${radius}px)`;
+    tempCtx.drawImage(sourceCanvas, 0, 0);
+    return tempCtx.getImageData(0, 0, w, h).data;
+}
+
+function getBlurredPreview() {
+    if (!state.blurCache) {
+        state.blurCache = getBlurData(state.previewCanvas, getBlurRadius(Math.max(state.previewWidth, state.previewHeight)));
+    }
+    return state.blurCache;
 }
 
 function drawFrame(ctx, w, h, frameType) {
@@ -1212,81 +1568,98 @@ function applyFilterPipelineWasm(srcImageData, dstImageData, adj, blurred = null
     const h = srcImageData.height;
     const len = srcImageData.data.length;
     
-    const srcPtr = wasmExports.alloc(len);
-    const srcHeap = new Uint8Array(wasmExports.memory.buffer, srcPtr, len);
-    srcHeap.set(srcImageData.data);
+    // Every allocation is released in `finally`, even if the module traps part-way through
+    const allocations = [];
+    const allocate = (size) => {
+        const ptr = wasmExports.alloc(size);
+        allocations.push([ptr, size]);
+        return ptr;
+    };
     
-    const dstPtr = wasmExports.alloc(len);
-    
-    let blurredPtr = 0;
-    if (blurred) {
-        blurredPtr = wasmExports.alloc(len);
-        const blurredHeap = new Uint8Array(wasmExports.memory.buffer, blurredPtr, len);
-        blurredHeap.set(blurred);
-    }
-    
-    const curvesBuffer = new Uint8Array(1024);
-    curvesBuffer.set(state.curveLUTs.rgb, 0);
-    curvesBuffer.set(state.curveLUTs.red, 256);
-    curvesBuffer.set(state.curveLUTs.green, 512);
-    curvesBuffer.set(state.curveLUTs.blue, 768);
-    
-    const curvesPtr = wasmExports.alloc(1024);
-    const curvesHeap = new Uint8Array(wasmExports.memory.buffer, curvesPtr, 1024);
-    curvesHeap.set(curvesBuffer);
-    
-    let hasCurves = 0;
-    for (let j = 0; j < 1024; j++) {
-        if (curvesBuffer[j] !== (j % 256)) {
-            hasCurves = 1;
-            break;
-        }
-    }
-    
-    const hslBuffer = new Float32Array(24);
-    const hslChannels = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
-    let hasHsl = 0;
-    
-    hslChannels.forEach((chan, idx) => {
-        hslBuffer[idx] = state.hsl.hue[chan];
-        hslBuffer[8 + idx] = state.hsl.saturation[chan];
-        hslBuffer[16 + idx] = state.hsl.luminance[chan];
+    try {
+        const srcPtr = allocate(len);
+        new Uint8Array(wasmExports.memory.buffer, srcPtr, len).set(srcImageData.data);
         
-        if (state.hsl.hue[chan] !== 0 || state.hsl.saturation[chan] !== 0 || state.hsl.luminance[chan] !== 0) {
-            hasHsl = 1;
+        const dstPtr = allocate(len);
+        
+        let blurredPtr = 0;
+        if (blurred) {
+            blurredPtr = allocate(len);
+            new Uint8Array(wasmExports.memory.buffer, blurredPtr, len).set(blurred);
         }
-    });
-    
-    const hslPtr = wasmExports.alloc(24 * 4);
-    const hslHeap = new Float32Array(wasmExports.memory.buffer, hslPtr, 24);
-    hslHeap.set(hslBuffer);
-    
-    const expFactor = adj.exposure;
-    const contrastFactor = adj.contrast;
-    
+        
+        const curvesBuffer = new Uint8Array(1024);
+        curvesBuffer.set(state.curveLUTs.rgb, 0);
+        curvesBuffer.set(state.curveLUTs.red, 256);
+        curvesBuffer.set(state.curveLUTs.green, 512);
+        curvesBuffer.set(state.curveLUTs.blue, 768);
+        
+        const curvesPtr = allocate(1024);
+        new Uint8Array(wasmExports.memory.buffer, curvesPtr, 1024).set(curvesBuffer);
+        
+        let hasCurves = 0;
+        for (let j = 0; j < 1024; j++) {
+            if (curvesBuffer[j] !== (j % 256)) {
+                hasCurves = 1;
+                break;
+            }
+        }
+        
+        const hslBuffer = new Float32Array(24);
+        const hslChannels = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
+        let hasHsl = 0;
+        
+        hslChannels.forEach((chan, idx) => {
+            hslBuffer[idx] = state.hsl.hue[chan];
+            hslBuffer[8 + idx] = state.hsl.saturation[chan];
+            hslBuffer[16 + idx] = state.hsl.luminance[chan];
+            
+            if (state.hsl.hue[chan] !== 0 || state.hsl.saturation[chan] !== 0 || state.hsl.luminance[chan] !== 0) {
+                hasHsl = 1;
+            }
+        });
+        
+        const hslPtr = allocate(24 * 4);
+        new Float32Array(wasmExports.memory.buffer, hslPtr, 24).set(hslBuffer);
+        
+        const p = computePipelineParams(adj);
+        
+        wasmExports.process_pixels(
+            srcPtr,
+            dstPtr,
+            len,
+            w,
+            h,
+            adj.exposure,
+            adj.contrast,
+            p.tRed, p.tGreen, p.tBlue,
+            p.tintRed, p.tintGreen, p.tintBlue,
+            p.satFactor,
+            p.hFactor, p.sFactor, p.wFactor, p.bFactor,
+            p.vibFactor, p.clarityFactor, p.dhFactor,
+            p.sharpFactor, p.nrFactor, p.vigFactor, p.grainFactor,
+            p.hR, p.hG, p.hB,
+            p.sR, p.sG, p.sB,
+            p.hasSplitToning ? 1 : 0,
+            p.balanceFactor,
+            hasCurves,
+            curvesPtr,
+            hasHsl,
+            hslPtr,
+            blurredPtr
+        );
+        
+        dstImageData.data.set(new Uint8Array(wasmExports.memory.buffer, dstPtr, len));
+    } finally {
+        allocations.forEach(([ptr, size]) => wasmExports.dealloc(ptr, size));
+    }
+}
+
+// Slider values -> per-pixel factors (shared by the Wasm and JS engines so they cannot drift apart)
+function computePipelineParams(adj) {
     const tRed = adj.temperature > 0 ? adj.temperature * 0.5 : adj.temperature * 0.2;
     const tBlue = adj.temperature > 0 ? -adj.temperature * 0.5 : -adj.temperature * 0.75;
-    const tGreen = adj.temperature > 0 ? adj.temperature * 0.08 : adj.temperature * 0.08;
-
-    const tintRed = adj.tint * 0.25;
-    const tintGreen = -adj.tint * 0.35;
-    const tintBlue = adj.tint * 0.25;
-
-    const satFactor = (adj.saturation + 100) / 100;
-    
-    const hFactor = adj.highlights * 0.35;
-    const sFactor = adj.shadows * 0.35;
-    const wFactor = adj.whites * 0.25;
-    const bFactor = adj.blacks * 0.25;
-    
-    const vibFactor = adj.vibrance * 0.01;
-    const clarityFactor = adj.clarity * 0.01;
-    const dhFactor = adj.dehaze * 0.01;
-    
-    const sharpFactor = adj.sharpening * 0.01 * 1.5;
-    const nrFactor = adj.noiseReduction * 0.01 * 0.8;
-    const vigFactor = adj.vignette * 0.01;
-    const grainFactor = adj.grain * 0.01;
+    const tGreen = adj.temperature * 0.08;
     
     let hR = 0, hG = 0, hB = 0;
     if (adj.splitHighlightSat > 0) {
@@ -1303,52 +1676,54 @@ function applyFilterPipelineWasm(srcImageData, dstImageData, adj, blurred = null
         sG = (gTemp - 128) * 0.5;
         sB = (bTemp - 128) * 0.5;
     }
-    const hasSplitToning = (adj.splitHighlightSat > 0 || adj.splitShadowSat > 0) ? 1 : 0;
-    const balanceFactor = adj.splitBalance * 0.01;
     
-    wasmExports.process_pixels(
-        srcPtr,
-        dstPtr,
-        len,
-        w,
-        h,
-        expFactor,
-        contrastFactor,
+    return {
         tRed, tGreen, tBlue,
-        tintRed, tintGreen, tintBlue,
-        satFactor,
-        hFactor, sFactor, wFactor, bFactor,
-        vibFactor, clarityFactor, dhFactor,
-        sharpFactor, nrFactor, vigFactor, grainFactor,
-        hR, hG, hB,
-        sR, sG, sB,
-        hasSplitToning,
-        balanceFactor,
-        hasCurves,
-        curvesPtr,
-        hasHsl,
-        hslPtr,
-        blurredPtr
-    );
-    
-    const dstHeap = new Uint8Array(wasmExports.memory.buffer, dstPtr, len);
-    dstImageData.data.set(dstHeap);
-    
-    wasmExports.dealloc(srcPtr, len);
-    wasmExports.dealloc(dstPtr, len);
-    wasmExports.dealloc(curvesPtr, 1024);
-    wasmExports.dealloc(hslPtr, 24 * 4);
-    if (blurredPtr) {
-        wasmExports.dealloc(blurredPtr, len);
-    }
+        tintRed: adj.tint * 0.25,
+        tintGreen: -adj.tint * 0.35,
+        tintBlue: adj.tint * 0.25,
+        satFactor: (adj.saturation + 100) / 100,
+        hFactor: adj.highlights * 0.35,
+        sFactor: adj.shadows * 0.35,
+        wFactor: adj.whites * 0.25,
+        bFactor: adj.blacks * 0.25,
+        vibFactor: adj.vibrance * 0.01,
+        clarityFactor: adj.clarity * 0.01,
+        dhFactor: adj.dehaze * 0.01,
+        sharpFactor: adj.sharpening * 0.01 * 1.5,
+        nrFactor: adj.noiseReduction * 0.01 * 0.8,
+        vigFactor: adj.vignette * 0.01,
+        grainFactor: adj.grain * 0.01,
+        hR, hG, hB, sR, sG, sB,
+        hasSplitToning: (adj.splitHighlightSat > 0 || adj.splitShadowSat > 0),
+        balanceFactor: adj.splitBalance * 0.01
+    };
+}
+
+// Deterministic per-pixel noise in [-0.5, 0.5). Must match grain_noise() in src-rust/src/lib.rs.
+function grainNoise(px) {
+    let h = Math.imul(px, 0x9E3779B1);
+    h ^= h >>> 15;
+    h = Math.imul(h, 0x85EBCA77);
+    h ^= h >>> 13;
+    h = Math.imul(h, 0xC2B2AE3D);
+    h ^= h >>> 16;
+    return (h >>> 8) / 16777216 - 0.5;
 }
 
 function applyFilterPipeline(srcData, dstData, adj, blurred = null) {
     if (wasmExports) {
-        applyFilterPipelineWasm(srcData, dstData, adj, blurred);
-    } else {
-        applyFilterPipelineJS(srcData, dstData, adj, blurred);
+        try {
+            applyFilterPipelineWasm(srcData, dstData, adj, blurred);
+            return;
+        } catch (err) {
+            // e.g. out of Wasm memory on a very large export: continue with the JS engine
+            console.error("Wasm engine failed, falling back to JS engine:", err);
+            wasmFailures++;
+            if (wasmFailures >= 3) wasmExports = null;
+        }
     }
+    applyFilterPipelineJS(srcData, dstData, adj, blurred);
 }
 
 /**
@@ -1372,56 +1747,20 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
     // 2. Contrast precomputation
     const contrastFactor = (259 * (adj.contrast + 255)) / (255 * (259 - adj.contrast));
     
-    // 3. Color Temperature precomputation
-    const tRed = adj.temperature > 0 ? adj.temperature * 0.5 : adj.temperature * 0.2;
-    const tBlue = adj.temperature > 0 ? -adj.temperature * 0.5 : -adj.temperature * 0.75;
-    const tGreen = adj.temperature > 0 ? adj.temperature * 0.08 : adj.temperature * 0.08;
-
-    // 4. Tint precomputation
-    const tintRed = adj.tint * 0.25;
-    const tintGreen = -adj.tint * 0.35;
-    const tintBlue = adj.tint * 0.25;
-
-    // 5. Saturation precomputation
-    const satFactor = (adj.saturation + 100) / 100;
-    
-    // Advanced Tone controls precomputation
-    const hFactor = adj.highlights * 0.35;
-    const sFactor = adj.shadows * 0.35;
-    const wFactor = adj.whites * 0.25;
-    const bFactor = adj.blacks * 0.25;
-    
-    // Presence precomputation
-    const vibFactor = adj.vibrance * 0.01;
-    const clarityFactor = adj.clarity * 0.01;
-    const dhFactor = adj.dehaze * 0.01;
-    
-    // Details & Effects precomputation
-    const sharpFactor = adj.sharpening * 0.01 * 1.5;
-    const nrFactor = adj.noiseReduction * 0.01 * 0.8;
-    const vigFactor = adj.vignette * 0.01;
-    const grainFactor = adj.grain * 0.01;
-    
-    // Split Toning precomputation
-    let hR = 0, hG = 0, hB = 0;
-    if (adj.splitHighlightSat > 0) {
-        const [rTemp, gTemp, bTemp] = hslToRgb(adj.splitHighlightHue, adj.splitHighlightSat / 100, 0.5);
-        hR = (rTemp - 128) * 0.5;
-        hG = (gTemp - 128) * 0.5;
-        hB = (bTemp - 128) * 0.5;
-    }
-    
-    let sR = 0, sG = 0, sB = 0;
-    if (adj.splitShadowSat > 0) {
-        const [rTemp, gTemp, bTemp] = hslToRgb(adj.splitShadowHue, adj.splitShadowSat / 100, 0.5);
-        sR = (rTemp - 128) * 0.5;
-        sG = (gTemp - 128) * 0.5;
-        sB = (bTemp - 128) * 0.5;
-    }
-    const hasSplitToning = (adj.splitHighlightSat > 0 || adj.splitShadowSat > 0);
-    const balanceFactor = adj.splitBalance * 0.01;
+    // 3. Everything else (temperature, tint, tone, presence, effects, split toning)
+    const {
+        tRed, tGreen, tBlue, tintRed, tintGreen, tintBlue, satFactor,
+        hFactor, sFactor, wFactor, bFactor,
+        vibFactor, clarityFactor, dhFactor,
+        sharpFactor, nrFactor, vigFactor, grainFactor,
+        hR, hG, hB, sR, sG, sB, hasSplitToning, balanceFactor
+    } = computePipelineParams(adj);
 
     // Precheck: Are curves active?
+    const curveRgb = state.curveLUTs.rgb;
+    const curveRed = state.curveLUTs.red;
+    const curveGreen = state.curveLUTs.green;
+    const curveBlue = state.curveLUTs.blue;
     let hasCurves = false;
     for (const ch of ['rgb', 'red', 'green', 'blue']) {
         const lut = state.curveLUTs[ch];
@@ -1500,7 +1839,7 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
         if (adj.clarity !== 0) {
             // Midtone S-curve contrast boost
             const sCurve = (v) => {
-                const vn = v / 255;
+                const vn = v < 0 ? 0 : (v > 255 ? 1 : v / 255);
                 return (3 * vn * vn - 2 * vn * vn * vn) * 255;
             };
             if (clarityFactor > 0) {
@@ -1592,13 +1931,13 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
             let gc = g < 0 ? 0 : (g > 255 ? 255 : g);
             let bc = b < 0 ? 0 : (b > 255 ? 255 : b);
             
-            r = state.curveLUTs.red[Math.round(rc)];
-            g = state.curveLUTs.green[Math.round(gc)];
-            b = state.curveLUTs.blue[Math.round(bc)];
+            r = curveRed[rc | 0];
+            g = curveGreen[gc | 0];
+            b = curveBlue[bc | 0];
             
-            r = state.curveLUTs.rgb[Math.round(r)];
-            g = state.curveLUTs.rgb[Math.round(g)];
-            b = state.curveLUTs.rgb[Math.round(b)];
+            r = curveRgb[r];
+            g = curveRgb[g];
+            b = curveRgb[b];
         }
         
         // --- 10.5. SPLIT TONING ---
@@ -1636,7 +1975,7 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
         
         // --- 12. FILM GRAIN ---
         if (adj.grain > 0) {
-            const noise = (((i * 9301 + 49297) % 233280) / 233280 - 0.5) * grainFactor * 0.12 * 255;
+            const noise = grainNoise(i >> 2) * grainFactor * 0.12 * 255;
             r += noise; g += noise; b += noise;
         }
         
@@ -1652,9 +1991,53 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
  * ZOOM & PAN SYSTEM
  * ========================================== */
 
+function getTrueZoom() {
+    if (!state.originalImage || !state.previewWidth) return state.zoom;
+    return state.zoom * state.previewWidth / getFinalSize().w;
+}
+
+// Blur radius used for sharpening / noise reduction. 1.5px at the 1200px reference size, scaled with the
+// canvas so the effect looks the same in the preview, the zoomed-in detail preview and the export.
+function getBlurRadius(canvasMaxSide) {
+    const fullSize = getFinalSize();
+    const reference = Math.min(Math.max(fullSize.w, fullSize.h), MAX_PREVIEW_DIMENSION);
+    return Math.max(0.5, 1.5 * canvasMaxSide / reference);
+}
+
+// While zoomed in, the preview is re-rendered at a higher resolution so detail stays sharp.
+// Hysteresis avoids flip-flopping; the on-screen size is kept constant by rescaling `zoom`.
+function scheduleDetailUpdate() {
+    clearTimeout(state.detailTimer);
+    state.detailTimer = setTimeout(updatePreviewDetail, 220);
+}
+
+function updatePreviewDetail() {
+    if (!state.originalImage || state.isCropMode || state.isComparing) return;
+    const fullSize = getFinalSize();
+    const fullMax = Math.max(fullSize.w, fullSize.h);
+    const displayedMax = Math.max(state.previewWidth, state.previewHeight) * state.zoom / 100;
+    const wanted = clamp(Math.ceil(displayedMax * (window.devicePixelRatio || 1)),
+        MAX_PREVIEW_DIMENSION, Math.min(fullMax, MAX_DETAIL_DIMENSION));
+    const current = state.previewMaxDim;
+    if (!(wanted > current * 1.25 || wanted < current / 1.5)) return;
+    if (wanted === current) return;
+    
+    const oldWidth = state.previewWidth;
+    state.previewMaxDim = wanted;
+    rebuildPreview();
+    state.zoom *= oldWidth / state.previewWidth;
+    // Swap without the CSS transition so the (visually identical) change does not animate
+    canvasWrapper.style.transition = 'none';
+    updateCanvasTransform();
+    void canvasWrapper.offsetWidth;
+    canvasWrapper.style.transition = '';
+    render(); // paint the new resolution immediately instead of one frame later
+}
+
 function updateCanvasTransform() {
     canvasWrapper.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom / 100})`;
-    zoomDisplay.textContent = `${Math.round(state.zoom)}%`;
+    // The label shows the scale relative to the real image, not to the (down-scaled) preview
+    zoomDisplay.textContent = `${Math.round(getTrueZoom())}%`;
     
     if (state.zoom > 100 || !state.isFit) {
         canvasWrapper.classList.add('grab-mode');
@@ -1663,44 +2046,68 @@ function updateCanvasTransform() {
     }
 }
 
-function adjustZoom(amount) {
+// Zoom around a point (defaults to the viewport centre) so the pixel under the cursor stays put
+function zoomTo(newZoom, clientX, clientY) {
     if (!state.originalImage) return;
-    
-    state.isFit = false;
+    newZoom = clamp(newZoom, MIN_ZOOM, MAX_ZOOM);
     const oldZoom = state.zoom;
-    state.zoom = Math.max(10, Math.min(500, state.zoom + amount));
+    if (Math.abs(newZoom - oldZoom) < 0.01) return;
     
-    if (state.zoom !== oldZoom) {
-        state.pan.x = (state.pan.x * state.zoom) / oldZoom;
-        state.pan.y = (state.pan.y * state.zoom) / oldZoom;
-    }
+    const rect = editorContainer.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const ax = (clientX !== undefined ? clientX : centerX) - centerX;
+    const ay = (clientY !== undefined ? clientY : centerY) - centerY;
+    const ratio = newZoom / oldZoom;
+    
+    state.pan.x = ax - ratio * (ax - state.pan.x);
+    state.pan.y = ay - ratio * (ay - state.pan.y);
+    state.zoom = newZoom;
+    state.isFit = false;
     
     updateCanvasTransform();
+    scheduleDetailUpdate();
+}
+
+// Multiplicative zoom step (each click/keypress changes the size by the same visual amount)
+function adjustZoom(factor, clientX, clientY) {
+    zoomTo(state.zoom * factor, clientX, clientY);
 }
 
 function toggleZoomFit() {
     if (!state.originalImage) return;
     
     if (state.isFit) {
+        // True 100% (one screen pixel per image pixel); the detail preview follows once it settles
         state.isFit = false;
-        state.zoom = 100;
+        state.zoom = 100 * getFinalSize().w / state.previewWidth;
         state.pan = { x: 0, y: 0 };
+        updateCanvasTransform();
+        scheduleDetailUpdate();
     } else {
         fitImageToViewport();
     }
-    updateCanvasTransform();
 }
 
 function fitImageToViewport() {
+    if (!state.previewWidth || !state.previewHeight) return;
     const viewport = document.getElementById('viewport');
     const vw = viewport.clientWidth - 80;
     const vh = viewport.clientHeight - 80;
+    if (vw <= 0 || vh <= 0) return; // viewport hidden / not laid out yet
+    
+    // Fitting needs no extra detail: go back to the base preview resolution
+    if (state.previewMaxDim !== MAX_PREVIEW_DIMENSION && !state.isCropMode) {
+        clearTimeout(state.detailTimer);
+        state.previewMaxDim = MAX_PREVIEW_DIMENSION;
+        rebuildPreview();
+    }
     
     const wRatio = vw / state.previewWidth;
     const hRatio = vh / state.previewHeight;
     const fitRatio = Math.min(wRatio, hRatio, 1.0);
     
-    state.zoom = fitRatio * 100;
+    state.zoom = Math.max(MIN_ZOOM, fitRatio * 100);
     state.isFit = true;
     state.pan = { x: 0, y: 0 };
     updateCanvasTransform();
@@ -1708,7 +2115,7 @@ function fitImageToViewport() {
 
 // Pan interactions
 function startPanning(e) {
-    if (!state.originalImage) return;
+    if (!state.originalImage || e.button !== 0) return;
     
     state.isPanning = true;
     canvasWrapper.classList.remove('grab-mode');
@@ -1744,6 +2151,7 @@ function stopPanning() {
  * ========================================== */
 
 function saveHistoryState() {
+    if (!state.originalImage) return;
     if (state.historyIndex < state.history.length - 1) {
         state.history = state.history.slice(0, state.historyIndex + 1);
     }
@@ -1751,9 +2159,10 @@ function saveHistoryState() {
     // Save complete snapshot of all Lightroom controls
     const snapshot = {
         adjustments: { ...state.adjustments },
-        curves: JSON.parse(JSON.stringify(state.curves)),
-        hsl: JSON.parse(JSON.stringify(state.hsl)),
-        cropTransform: JSON.parse(JSON.stringify(state.cropTransform))
+        curves: state.curves,
+        hsl: state.hsl,
+        cropTransform: state.cropTransform,
+        activeFrame: state.activeFrame
     };
     
     const currentSnapshotStr = JSON.stringify(snapshot);
@@ -1773,6 +2182,8 @@ function saveHistoryState() {
 }
 
 function undo() {
+    if (state.isCropMode) return;
+    cancelPresetAnimation();
     if (state.historyIndex > 0) {
         state.historyIndex--;
         restoreHistoryState();
@@ -1780,34 +2191,43 @@ function undo() {
 }
 
 function redo() {
+    if (state.isCropMode) return;
+    cancelPresetAnimation();
     if (state.historyIndex < state.history.length - 1) {
         state.historyIndex++;
         restoreHistoryState();
     }
 }
 
+// Finds the preset whose values equal the current adjustments (every preset key is compared)
+function findMatchingPreset(adj) {
+    const matches = (preset) => PRESET_KEYS.every(key => (preset[key] || 0) === (Number(adj[key]) || 0));
+    let found = null;
+    Object.keys(PRESETS).forEach(name => {
+        if (matches(PRESETS[name]) && (found === null || found === 'original')) found = name;
+    });
+    if (found === null) {
+        Object.keys(state.customPresets).forEach(name => {
+            if (found === null && matches(state.customPresets[name])) found = `my:${name}`;
+        });
+    }
+    return found;
+}
+
 function restoreHistoryState() {
     const snapshot = JSON.parse(state.history[state.historyIndex]);
+    const previousCrop = JSON.stringify(state.cropTransform);
+    
     state.adjustments = snapshot.adjustments;
     state.curves = snapshot.curves;
     state.hsl = snapshot.hsl;
     state.cropTransform = snapshot.cropTransform;
 
     // Update inputs visual values
-    Object.keys(state.adjustments).forEach(key => {
-        const input = inputs[key];
-        if (input) {
-            input.value = state.adjustments[key];
-            const sliderControl = input.closest('.slider-control');
-            const valDisplay = sliderControl ? sliderControl.querySelector('.val-display') : null;
-            if (valDisplay) {
-                const val = state.adjustments[key];
-                valDisplay.textContent = typeof val === 'number' && val > 0 ? `+${val}` : val;
-            }
-        }
-    });
+    Object.keys(state.adjustments).forEach(key => setSliderUI(key, state.adjustments[key]));
     
-
+    // Frame
+    setActiveFrame(snapshot.activeFrame || 'none');
     
     // Update HSL sliders visual values
     updateHslSlidersUI();
@@ -1816,13 +2236,16 @@ function restoreHistoryState() {
     recomputeAllCurveLUTs();
     drawCurveEditor();
     
-    // Recompute Cropped Preview Canvas if cropTransform changed
-    updateCroppedPreview();
+    // Rebuild the preview only when the crop / rotation actually changed
+    syncStraightenUI();
+    if (JSON.stringify(state.cropTransform) !== previousCrop) {
+        updateCroppedPreview();
+    } else {
+        requestRender();
+    }
     
-    // Check if it matches any presets to highlight buttons
-    let matchedPreset = 'custom';
-    
-    // Checks if advanced elements are at default state (curves identity, HSL zero, crop null)
+    // Check if it matches any presets to highlight buttons.
+    // Only meaningful while the advanced elements are at their default state.
     let isHslDefault = true;
     for (const tab of ['hue', 'saturation', 'luminance']) {
         for (const chan in state.hsl[tab]) {
@@ -1838,22 +2261,14 @@ function restoreHistoryState() {
         }
     }
     
-    const isCropDefault = (state.cropTransform.crop === null && state.cropTransform.rotate === 0 && state.cropTransform.straighten === 0 && !state.cropTransform.flipH && !state.cropTransform.flipV);
-    
-    if (isHslDefault && isCurvesDefault && isCropDefault) {
-        Object.keys(PRESETS).forEach(pName => {
-            const preset = PRESETS[pName];
-            let match = true;
-            Object.keys(preset).forEach(key => {
-                if (preset[key] !== state.adjustments[key]) match = false;
-            });
-            if (match) matchedPreset = pName;
-        });
+    let matchedPreset = 'custom';
+    if (isHslDefault && isCurvesDefault) {
+        matchedPreset = findMatchingPreset(state.adjustments) || 'custom';
     }
     
     state.activePreset = matchedPreset;
     clearPresetHighlights();
-    const activeBtn = Array.from(presetButtons).find(btn => btn.dataset.preset === matchedPreset);
+    const activeBtn = Array.from(getPresetButtons()).find(btn => btn.dataset.preset === matchedPreset);
     if (activeBtn) activeBtn.classList.add('active');
     
     updateHistoryButtons();
@@ -1868,121 +2283,311 @@ function updateHistoryButtons() {
  * HIGH RESOLUTION IMAGE EXPORT
  * ========================================== */
 
-function downloadHighResImage() {
+const EXPORT_FORMATS = {
+    'image/jpeg': { ext: 'jpg', label: 'JPEG', lossy: true },
+    'image/png': { ext: 'png', label: 'PNG', lossy: false },
+    'image/webp': { ext: 'webp', label: 'WebP', lossy: true }
+};
+const EXPORT_SETTINGS_KEY = 'pep_export_settings';
+
+// Formats the canvas can encode; anything else (gif, bmp, avif, ...) falls back to a sensible one
+function normalizeExportFormat(type) {
+    if (EXPORT_FORMATS[type]) return type;
+    return (type === 'image/gif' || type === 'image/svg+xml') ? 'image/png' : 'image/jpeg';
+}
+
+function loadExportSettings() {
+    const defaults = { format: null, quality: 92, scale: 1 };
+    try {
+        const saved = JSON.parse(safeStorageGet(EXPORT_SETTINGS_KEY) || '{}');
+        return {
+            format: EXPORT_FORMATS[saved.format] ? saved.format : defaults.format,
+            quality: clamp(Number(saved.quality) || defaults.quality, 50, 100),
+            scale: [1, 0.75, 0.5, 0.25].includes(Number(saved.scale)) ? Number(saved.scale) : defaults.scale
+        };
+    } catch (e) {
+        return defaults;
+    }
+}
+
+function getFinalSize() {
+    const t = state.cropTransform;
+    const swapped = t.rotate === 90 || t.rotate === 270;
+    const tw = swapped ? state.originalImage.height : state.originalImage.width;
+    const th = swapped ? state.originalImage.width : state.originalImage.height;
+    const crop = (!state.isCropMode && t.crop) ? t.crop : { x: 0, y: 0, w: 1, h: 1 };
+    return { w: Math.max(1, Math.round(crop.w * tw)), h: Math.max(1, Math.round(crop.h * th)) };
+}
+
+function updateDimensionsDisplay() {
     if (!state.originalImage) return;
+    const size = getFinalSize();
+    dimensionsDisplay.textContent = `${size.w} × ${size.h} px`;
+}
+
+// Largest scale (<= requested) that keeps the export inside canvas limits
+function getSafeExportScale(requested) {
+    const size = getFinalSize();
+    let scale = requested;
+    if (size.w * size.h * scale * scale > MAX_EXPORT_PIXELS) {
+        scale = Math.sqrt(MAX_EXPORT_PIXELS / (size.w * size.h));
+    }
+    if (Math.max(size.w, size.h) * scale > MAX_EXPORT_SIDE) {
+        scale = MAX_EXPORT_SIDE / Math.max(size.w, size.h);
+    }
+    return scale;
+}
+
+function setupExportDialog() {
+    const overlay = document.getElementById('export-overlay');
+    if (!overlay) return;
+    
+    const selFormat = document.getElementById('export-format');
+    const rngQuality = document.getElementById('export-quality');
+    const qualityVal = document.getElementById('export-quality-val');
+    const qualityRow = document.getElementById('export-quality-row');
+    const selScale = document.getElementById('export-scale');
+    const sizeInfo = document.getElementById('export-size-info');
+    const btnDownloadNow = document.getElementById('btn-export-download');
+    const btnCopy = document.getElementById('btn-export-copy');
+    const btnCancel = document.getElementById('btn-export-cancel');
+    const btnClose = document.getElementById('btn-close-export');
+    
+    let exporting = false;
+    
+    const refresh = () => {
+        const fmt = EXPORT_FORMATS[selFormat.value];
+        qualityRow.style.display = fmt.lossy ? '' : 'none';
+        qualityVal.textContent = rngQuality.value;
+        
+        const size = getFinalSize();
+        const requested = parseFloat(selScale.value);
+        const safe = getSafeExportScale(requested);
+        const w = Math.max(1, Math.round(size.w * safe));
+        const h = Math.max(1, Math.round(size.h * safe));
+        const mp = (w * h / 1e6).toFixed(1);
+        sizeInfo.textContent = `輸出尺寸：${w} × ${h} px（約 ${mp} MP）` +
+            (safe < requested - 1e-6 ? '　⚠️ 超過瀏覽器畫布上限，已自動縮小' : '');
+    };
+    
+    const close = () => {
+        if (exporting) return;
+        overlay.style.display = 'none';
+    };
+    
+    const persist = () => {
+        safeStorageSet(EXPORT_SETTINGS_KEY, JSON.stringify({
+            format: selFormat.value,
+            quality: parseInt(rngQuality.value),
+            scale: parseFloat(selScale.value)
+        }));
+    };
+    
+    const run = async (mode) => {
+        if (exporting) return;
+        exporting = true;
+        btnDownloadNow.disabled = true;
+        btnCopy.disabled = true;
+        persist();
+        try {
+            const ok = await exportImage({
+                mime: selFormat.value,
+                quality: parseInt(rngQuality.value) / 100,
+                scale: parseFloat(selScale.value),
+                mode
+            });
+            if (ok) {
+                exporting = false;
+                close();
+            }
+        } finally {
+            exporting = false;
+            btnDownloadNow.disabled = false;
+            btnCopy.disabled = false;
+        }
+    };
+    
+    selFormat.addEventListener('change', refresh);
+    rngQuality.addEventListener('input', refresh);
+    selScale.addEventListener('change', refresh);
+    btnDownloadNow.addEventListener('click', () => run('download'));
+    btnCopy.addEventListener('click', () => run('copy'));
+    btnCancel.addEventListener('click', close);
+    btnClose.addEventListener('click', close);
+    overlay.addEventListener('mousedown', (e) => {
+        if (e.target === overlay) close();
+    });
+    overlay.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement) && !(e.target instanceof HTMLSelectElement)) {
+            e.preventDefault();
+            run('download');
+        }
+    });
+    
+    window.openExportDialog = () => {
+        if (!state.originalImage) return;
+        if (state.isCropMode) {
+            showToast('請先套用或取消裁切', 'error');
+            return;
+        }
+        const saved = loadExportSettings();
+        selFormat.value = saved.format || normalizeExportFormat(state.originalFormat);
+        rngQuality.value = saved.quality;
+        selScale.value = String(saved.scale);
+        refresh();
+        overlay.style.display = 'flex';
+        btnDownloadNow.focus();
+    };
+}
+
+function downloadHighResImage() {
+    if (typeof window.openExportDialog === 'function') window.openExportDialog();
+}
+
+function canvasToBlob(canvas, mime, quality) {
+    return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
+}
+
+// Renders the edited photo at full resolution and either downloads it or copies it to the clipboard.
+// Resolves true on success.
+async function exportImage({ mime, quality, scale, mode }) {
+    if (!state.originalImage) return false;
     
     showLoading(true);
+    // Let the loading overlay paint before the heavy synchronous work starts
+    await new Promise(r => setTimeout(r, 50));
     
-    setTimeout(() => {
-        try {
-            // Get cropped, rotated, flipped canvas at full resolution
-            const croppedCanvas = getCroppedCanvas(state.originalImage, false);
-            const croppedCtx = croppedCanvas.getContext('2d');
-            const w = croppedCanvas.width;
-            const h = croppedCanvas.height;
-            
-            const srcImageData = croppedCtx.getImageData(0, 0, w, h);
-            const dstImageData = croppedCtx.createImageData(w, h);
-            
-            // Generate blurred data if sharpening or noise reduction is active
-            let blurredData = null;
-            if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = w;
-                tempCanvas.height = h;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.filter = 'blur(1.5px)';
-                tempCtx.drawImage(croppedCanvas, 0, 0);
-                blurredData = tempCtx.getImageData(0, 0, w, h).data;
-            }
-            
-            applyFilterPipeline(srcImageData, dstImageData, state.adjustments, blurredData);
-            
-            croppedCtx.putImageData(dstImageData, 0, 0);
-            
-            // Draw watermark if configured
-            if (state.adjustments.watermarkText) {
-                drawWatermark(croppedCtx, w, h, state.adjustments);
-            }
-            
-            // Draw artistic frame if configured
-            if (state.activeFrame && state.activeFrame !== 'none') {
-                drawFrame(croppedCtx, w, h, state.activeFrame);
-            }
-            const dataUrl = croppedCanvas.toDataURL(state.originalFormat, 0.95);
-            const link = document.createElement('a');
-            
+    try {
+        const safeScale = getSafeExportScale(scale);
+        
+        // Get cropped, rotated, flipped canvas at full resolution
+        const exportCanvas = getCroppedCanvas(state.originalImage, { scale: safeScale });
+        const exportCtx = exportCanvas.getContext('2d', { willReadFrequently: true });
+        const w = exportCanvas.width;
+        const h = exportCanvas.height;
+        
+        const srcImageData = exportCtx.getImageData(0, 0, w, h);
+        const dstImageData = exportCtx.createImageData(w, h);
+        
+        // The blur radius scales with the canvas so sharpening looks the same at full size
+        let blurredData = null;
+        if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
+            blurredData = getBlurData(exportCanvas, getBlurRadius(Math.max(w, h)));
+        }
+        
+        applyFilterPipeline(srcImageData, dstImageData, state.adjustments, blurredData);
+        
+        exportCtx.putImageData(dstImageData, 0, 0);
+        
+        // Draw watermark if configured
+        if (state.adjustments.watermarkText) {
+            drawWatermark(exportCtx, w, h, state.adjustments);
+        }
+        
+        // Draw artistic frame if configured
+        if (state.activeFrame && state.activeFrame !== 'none') {
+            drawFrame(exportCtx, w, h, state.activeFrame);
+        }
+        
+        // JPEG has no alpha channel: composite over white instead of letting transparency turn black
+        const targetMime = mode === 'copy' ? 'image/png' : mime;
+        if (targetMime === 'image/jpeg') {
+            exportCtx.save();
+            exportCtx.globalCompositeOperation = 'destination-over';
+            exportCtx.fillStyle = '#ffffff';
+            exportCtx.fillRect(0, 0, w, h);
+            exportCtx.restore();
+        }
+        
+        const blob = await canvasToBlob(exportCanvas, targetMime, quality);
+        if (!blob || blob.type !== targetMime) {
+            throw new Error(`Encoding as ${targetMime} is not supported`);
+        }
+        
+        if (mode === 'copy') {
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+            showToast('已複製到剪貼簿', 'success');
+        } else {
             let suffix = '';
             if (state.activePreset !== 'original' && state.activePreset !== 'custom') {
-                suffix = `-${state.activePreset}`;
+                const presetLabel = state.activePreset.replace(/^my:/, '');
+                suffix = `-${presetLabel.replace(/[^\w\u4e00-\u9fff-]+/g, '_')}`;
             } else if (state.activePreset === 'custom') {
                 suffix = '-edited';
             }
+            const safeName = (state.originalFileName || 'edited-photo').replace(/[\\/:*?"<>|]+/g, '_');
             
-            let ext = 'jpg';
-            if (state.originalFormat === 'image/png') ext = 'png';
-            else if (state.originalFormat === 'image/webp') ext = 'webp';
-            
-            link.download = `${state.originalFileName}${suffix}.${ext}`;
-            link.href = dataUrl;
-            
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = `${safeName}${suffix}.${EXPORT_FORMATS[targetMime].ext}`;
+            link.href = url;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-        } catch (error) {
-            console.error(error);
-            alert('儲存相片時發生錯誤，請再試一次。');
-        } finally {
-            showLoading(false);
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+            
+            if (safeScale < scale - 1e-6) {
+                showToast('圖片超過畫布上限，已自動縮小後儲存', 'info');
+            } else {
+                showToast('相片已儲存', 'success');
+            }
         }
-    }, 100);
+        return true;
+    } catch (error) {
+        console.error(error);
+        showToast(mode === 'copy' ? '複製失敗：瀏覽器未允許存取剪貼簿' : '儲存相片時發生錯誤，請再試一次', 'error');
+        return false;
+    } finally {
+        showLoading(false);
+    }
 }
 
 /* ==========================================
  * SMOOTH PRESET TRANSITIONS & GUI LOADING HELPERS
  * ========================================== */
 
-function animateSlidersTo(targets) {
+function cancelPresetAnimation() {
+    if (state.presetAnimation) {
+        clearInterval(state.presetAnimation);
+        state.presetAnimation = null;
+    }
+}
+
+function animateSlidersTo(targets, options = {}) {
+    const keepKeys = options.keepKeys || [];
     const steps = 15;
     const duration = 250; // ms
     const stepTime = duration / steps;
     
-    const defaultAdjustments = {
-        exposure: 0, contrast: 0, temperature: 0, tint: 0, saturation: 0,
-        highlights: 0, shadows: 0, whites: 0, blacks: 0,
-        vibrance: 0, clarity: 0, dehaze: 0,
-        sharpening: 0, noiseReduction: 0, vignette: 0, grain: 0
-    };
+    // Any previous animation is superseded (rapid clicks must not fight each other)
+    cancelPresetAnimation();
     
-    const fullTargets = { ...defaultAdjustments, ...targets };
+    const fullTargets = {};
+    PRESET_KEYS.forEach(key => {
+        if (!keepKeys.includes(key)) fullTargets[key] = 0;
+    });
+    Object.assign(fullTargets, targets);
+    
     const startValues = { ...state.adjustments };
     let currentStep = 0;
     
-    const interval = setInterval(() => {
+    state.presetAnimation = setInterval(() => {
         currentStep++;
         const ratio = currentStep / steps;
         
         Object.keys(fullTargets).forEach(key => {
-            const start = startValues[key] !== undefined ? startValues[key] : 0;
+            const start = Number(startValues[key]) || 0;
             const target = fullTargets[key];
             const currentVal = Math.round(start + (target - start) * ratio);
             
             state.adjustments[key] = currentVal;
-            
-            // Update Slider UI
-            if (inputs[key]) {
-                inputs[key].value = currentVal;
-                const valDisplay = inputs[key].closest('.slider-control').querySelector('.val-display');
-                if (valDisplay) {
-                    valDisplay.textContent = currentVal > 0 ? `+${currentVal}` : currentVal;
-                }
-            }
+            setSliderUI(key, currentVal);
         });
         
         requestRender();
         
         if (currentStep >= steps) {
-            clearInterval(interval);
+            cancelPresetAnimation();
             saveHistoryState(); // Save final snapshot after transition
         }
     }, stepTime);
@@ -2224,7 +2829,9 @@ function setupCurveEditor() {
             state.selectedCurvePoint = foundIdx;
             isDragging = true;
         } else {
-            if (points.length < 10) {
+            // Two control points on (almost) the same X would make the spline degenerate
+            const tooClose = points.some(p => Math.abs(p.x - pos.x) < 3);
+            if (!tooClose && points.length < 10) {
                 points.push(pos);
                 points.sort((a, b) => a.x - b.x);
                 state.selectedCurvePoint = points.findIndex(p => p.x === pos.x && p.y === pos.y);
@@ -2465,10 +3072,24 @@ let dragType = null;
 let dragStartMouse = { x: 0, y: 0 };
 let dragStartBox = { x: 0, y: 0, w: 1, h: 1 };
 
+function getAspectValue() {
+    const aspect = document.getElementById('crop-aspect').value;
+    if (aspect === '1:1') return 1;
+    if (aspect === '4:3') return 4 / 3;
+    if (aspect === '16:9') return 16 / 9;
+    if (aspect === '3:2') return 3 / 2;
+    if (aspect === '5:7') return 5 / 7;
+    if (aspect === 'original') {
+        // Aspect of the image as currently rotated (not of the untouched source)
+        const t = state.cropTransform;
+        const swapped = t.rotate === 90 || t.rotate === 270;
+        return swapped ? state.height / state.width : state.width / state.height;
+    }
+    return null;
+}
+
 function setupCropMode() {
     const btnToggle = document.getElementById('btn-crop-toggle');
-    const cropToolbar = document.getElementById('crop-toolbar');
-    const overlay = document.getElementById('crop-overlay-container');
     
     btnToggle.addEventListener('click', () => {
         if (!state.originalImage) return;
@@ -2517,12 +3138,17 @@ function setupCropMode() {
         displayStraighten.textContent = `${val > 0 ? '+' : ''}${val}°`;
         const cropBoxEl = document.getElementById('crop-box');
         if (cropBoxEl) cropBoxEl.classList.add('straightening');
-        updateCroppedPreview();
+        scheduleCroppedPreview();
     });
     inputStraighten.addEventListener('change', () => {
+        // History is saved once, when the crop is applied (a cancel must leave no trace)
         const cropBoxEl = document.getElementById('crop-box');
         if (cropBoxEl) cropBoxEl.classList.remove('straightening');
-        saveHistoryState();
+    });
+    inputStraighten.addEventListener('dblclick', () => {
+        inputStraighten.value = 0;
+        inputStraighten.dispatchEvent(new Event('input'));
+        inputStraighten.dispatchEvent(new Event('change'));
     });
     
     document.getElementById('crop-aspect').addEventListener('change', () => {
@@ -2535,6 +3161,7 @@ function setupCropMode() {
 }
 
 function enterCropMode() {
+    if (state.isComparing) return;
     state.isCropMode = true;
     document.getElementById('btn-crop-toggle').classList.add('active');
     document.getElementById('crop-toolbar').style.display = 'block';
@@ -2542,6 +3169,10 @@ function enterCropMode() {
     
     // Backup the crop state
     state.backupCropTransform = JSON.parse(JSON.stringify(state.cropTransform));
+    
+    // While cropping, the full (rotated / straightened but uncropped) image is shown and the crop box
+    // is expressed relative to it, so an existing crop can be refined instead of re-applied on a crop.
+    updateCroppedPreview();
     
     if (state.cropTransform.crop) {
         state.activeCropBox = { ...state.cropTransform.crop };
@@ -2552,6 +3183,7 @@ function enterCropMode() {
 }
 
 function exitCropMode(apply) {
+    if (!state.isCropMode) return;
     state.isCropMode = false;
     document.getElementById('btn-crop-toggle').classList.remove('active');
     document.getElementById('crop-toolbar').style.display = 'none';
@@ -2562,7 +3194,7 @@ function exitCropMode(apply) {
         if (cb.x < 0.01 && cb.y < 0.01 && cb.w > 0.99 && cb.h > 0.99) {
             state.cropTransform.crop = null;
         } else {
-            state.cropTransform.crop = { ...cb };
+            state.cropTransform.crop = { x: cb.x, y: cb.y, w: cb.w, h: cb.h };
         }
         updateCroppedPreview();
         saveHistoryState();
@@ -2571,28 +3203,16 @@ function exitCropMode(apply) {
         if (state.backupCropTransform) {
             state.cropTransform = state.backupCropTransform;
         }
-        
-        // Restore straighten slider visually
-        const straightenSlider = document.getElementById('input-straighten');
-        if (straightenSlider) {
-            straightenSlider.value = state.cropTransform.straighten;
-            document.getElementById('straighten-val').textContent = `${state.cropTransform.straighten > 0 ? '+' : ''}${state.cropTransform.straighten}°`;
-        }
+        syncStraightenUI();
         
         // Redraw preview using restored transforms
         updateCroppedPreview();
     }
+    state.backupCropTransform = null;
 }
 
 function resetActiveCropBox() {
-    const aspect = document.getElementById('crop-aspect').value;
-    let aspectVal = null;
-    if (aspect === '1:1') aspectVal = 1;
-    else if (aspect === '4:3') aspectVal = 4/3;
-    else if (aspect === '16:9') aspectVal = 16/9;
-    else if (aspect === '3:2') aspectVal = 3/2;
-    else if (aspect === '5:7') aspectVal = 5/7;
-    else if (aspect === 'original') aspectVal = state.width / state.height;
+    const aspectVal = getAspectValue();
     
     if (!aspectVal) {
         state.activeCropBox = { x: 0, y: 0, w: 1, h: 1 };
@@ -2618,81 +3238,108 @@ function resetActiveCropBox() {
     drawCropBoxUI();
 }
 
-function updateCroppedPreview() {
-    if (!state.originalImage) return;
-    showLoading(true);
-    setTimeout(() => {
-        state.previewCanvas = getCroppedCanvas(state.originalImage, true);
-        state.previewCtx = state.previewCanvas.getContext('2d');
-        state.previewWidth = state.previewCanvas.width;
-        state.previewHeight = state.previewCanvas.height;
-        state.previewImageData = state.previewCtx.getImageData(0, 0, state.previewWidth, state.previewHeight);
-        
-        state.editorCanvas.width = state.previewWidth;
-        state.editorCanvas.height = state.previewHeight;
-        
-        fitImageToViewport();
-        showLoading(false);
-        requestRender();
-    }, 50);
+// Rebuilds the preview canvas (and everything cached from it) from the original image
+// using the current crop / rotate / straighten / flip settings. Returns true if its size changed.
+function rebuildPreview() {
+    const canvas = getCroppedCanvas(state.originalImage, {
+        maxDim: state.isCropMode ? MAX_PREVIEW_DIMENSION : state.previewMaxDim,
+        ignoreCrop: state.isCropMode
+    });
+    const sizeChanged = canvas.width !== state.previewWidth || canvas.height !== state.previewHeight;
+    
+    state.previewCanvas = canvas;
+    state.previewCtx = canvas.getContext('2d', { willReadFrequently: true });
+    state.previewWidth = canvas.width;
+    state.previewHeight = canvas.height;
+    state.previewImageData = state.previewCtx.getImageData(0, 0, canvas.width, canvas.height);
+    state.blurCache = null;
+    state.outputImageData = null;
+    
+    if (state.editorCanvas.width !== canvas.width || state.editorCanvas.height !== canvas.height) {
+        state.editorCanvas.width = canvas.width;
+        state.editorCanvas.height = canvas.height;
+    }
+    
+    updateDimensionsDisplay();
+    return sizeChanged;
 }
 
-function getCroppedCanvas(sourceImg, preview = false) {
+function updateCroppedPreview() {
+    if (!state.originalImage) return;
+    const sizeChanged = rebuildPreview();
+    if (sizeChanged || state.isFit) fitImageToViewport();
+    requestRender();
+}
+
+// Coalesces rapid updates (e.g. dragging the straighten slider) into one rebuild per frame
+function scheduleCroppedPreview() {
+    if (state.previewRebuildPending) return;
+    state.previewRebuildPending = true;
+    requestAnimationFrame(() => {
+        state.previewRebuildPending = false;
+        updateCroppedPreview();
+    });
+}
+
+// Scale needed so a copy of the image rotated by `angle` still covers the whole w x h frame
+function getStraightenFillScale(w, h, angle) {
+    const a = Math.abs(angle);
+    if (a < 1e-9) return 1;
+    return Math.cos(a) + Math.sin(a) * Math.max(w / h, h / w);
+}
+
+/**
+ * Renders the source image with the current rotate / flip / straighten / crop applied.
+ *   scale     - multiplier on the (cropped) output size
+ *   maxDim    - optional cap on the longest output side (used for the preview)
+ *   ignoreCrop - draw the whole transformed image (used while the crop box is being edited)
+ * The crop rectangle is expressed in fractions of the transformed (rotated) image.
+ */
+function getCroppedCanvas(sourceImg, { scale = 1, maxDim = 0, ignoreCrop = false } = {}) {
     const srcW = sourceImg.width;
     const srcH = sourceImg.height;
     
-    const tempCanvas = document.createElement('canvas');
-    const tempCtx = tempCanvas.getContext('2d');
-    
     const transform = state.cropTransform;
-    const crop = transform.crop || { x: 0, y: 0, w: 1, h: 1 };
-    const rotate = transform.rotate;
-    const straighten = transform.straighten * Math.PI / 180;
-    const flipH = transform.flipH;
-    const flipV = transform.flipV;
+    const crop = (!ignoreCrop && transform.crop) ? transform.crop : { x: 0, y: 0, w: 1, h: 1 };
+    const angle = transform.straighten * Math.PI / 180;
     
-    const cx = crop.x * srcW;
-    const cy = crop.y * srcH;
-    const cw = crop.w * srcW;
-    const ch = crop.h * srcH;
+    // Size of the image after the 90-degree rotation
+    const isSwapped = (transform.rotate === 90 || transform.rotate === 270);
+    const tw = isSwapped ? srcH : srcW;
+    const th = isSwapped ? srcW : srcH;
     
-    const isSwapped = (rotate === 90 || rotate === 270);
-    const finalW = isSwapped ? ch : cw;
-    const finalH = isSwapped ? cw : ch;
+    const cx = crop.x * tw;
+    const cy = crop.y * th;
+    const cw = crop.w * tw;
+    const ch = crop.h * th;
     
-    let destW = finalW;
-    let destH = finalH;
-    
-    if (preview && (finalW > MAX_PREVIEW_DIMENSION || finalH > MAX_PREVIEW_DIMENSION)) {
-        if (finalW > finalH) {
-            destH = Math.round((finalH * MAX_PREVIEW_DIMENSION) / finalW);
-            destW = MAX_PREVIEW_DIMENSION;
-        } else {
-            destW = Math.round((finalW * MAX_PREVIEW_DIMENSION) / finalH);
-            destH = MAX_PREVIEW_DIMENSION;
-        }
+    let k = scale;
+    if (maxDim > 0 && Math.max(cw, ch) * k > maxDim) {
+        k = maxDim / Math.max(cw, ch);
     }
+    const destW = Math.max(1, Math.round(cw * k));
+    const destH = Math.max(1, Math.round(ch * k));
     
-    tempCanvas.width = destW;
-    tempCanvas.height = destH;
+    const canvas = document.createElement('canvas');
+    canvas.width = destW;
+    canvas.height = destH;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     
-    tempCtx.save();
-    tempCtx.translate(destW / 2, destH / 2);
-    tempCtx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-    tempCtx.rotate(straighten);
-    tempCtx.rotate(rotate * Math.PI / 180);
+    // Destination <- (crop window of the transformed image)
+    ctx.scale(destW / cw, destH / ch);
+    ctx.translate(-cx, -cy);
     
-    const drawW = isSwapped ? destH : destW;
-    const drawH = isSwapped ? destW : destH;
+    // Transformed image space: straighten (zoomed so no empty corners show), flip, then 90-degree rotation
+    const fill = getStraightenFillScale(tw, th, angle);
+    ctx.translate(tw / 2, th / 2);
+    ctx.rotate(angle);
+    ctx.scale(fill * (transform.flipH ? -1 : 1), fill * (transform.flipV ? -1 : 1));
+    ctx.rotate(transform.rotate * Math.PI / 180);
     
-    tempCtx.drawImage(
-        sourceImg,
-        cx, cy, cw, ch,
-        -drawW / 2, -drawH / 2, drawW, drawH
-    );
-    
-    tempCtx.restore();
-    return tempCanvas;
+    ctx.drawImage(sourceImg, -srcW / 2, -srcH / 2, srcW, srcH);
+    return canvas;
 }
 
 function setupCropInteraction() {
@@ -2735,14 +3382,7 @@ function handleCropDrag(e) {
     let dx = (e.clientX - dragStartMouse.x) / rect.width;
     let dy = (e.clientY - dragStartMouse.y) / rect.height;
     
-    const aspect = document.getElementById('crop-aspect').value;
-    let aspectVal = null;
-    if (aspect === '1:1') aspectVal = 1;
-    else if (aspect === '4:3') aspectVal = 4 / 3;
-    else if (aspect === '16:9') aspectVal = 16 / 9;
-    else if (aspect === '3:2') aspectVal = 3 / 2;
-    else if (aspect === '5:7') aspectVal = 5 / 7;
-    else if (aspect === 'original') aspectVal = state.width / state.height;
+    const aspectVal = getAspectValue();
     
     const box = { ...dragStartBox };
     
@@ -2917,7 +3557,7 @@ function drawWatermark(ctx, width, height, adj) {
     
     // Scale text size proportional to the image width
     const baseSize = Math.max(12, Math.round(width * 0.02 * (adj.watermarkSize / 50)));
-    ctx.font = `500 ${baseSize}px 'Plus Jakarta Sans', 'Noto Sans TC', sans-serif`;
+    ctx.font = `500 ${baseSize}px 'Plus Jakarta Sans', 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans CJK TC', sans-serif`;
     
     // Watermark color & opacity
     ctx.fillStyle = adj.watermarkColor || '#ffffff';
