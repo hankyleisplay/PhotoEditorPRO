@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "dist": "electron-builder --publish never",
     "build:secure": "node build-secure.js"
   },
   "devDependencies": {
