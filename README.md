@@ -52,7 +52,8 @@
 
 10. **細節操作**
     - **雙擊任一滑桿**（或其標籤）即可單獨重設該項目。
-    - 滾輪縮放以 **游標位置為中心**，每一步縮放比例一致。
+    - 滾輪縮放以 **游標位置為中心**，每一步縮放比例一致；縮放比例顯示的是**真實影像比例**，放大時會自動以更高解析度重繪（最高 2400px），細節保持清晰，按「符合視窗」即還原。
+    - 字型已內建（Plus Jakarta Sans），程式完全離線可用。
 
 ---
 
@@ -124,3 +125,22 @@ cp target/wasm32-unknown-unknown/release/image_processor.wasm ../image_processor
 ```
 
 > 修改 `src-rust/src/lib.rs` 的像素演算法時，請同步更新 `app.js` 中的 JS 後備引擎（例如 `grainNoise()`），兩者的結果必須一致。
+
+
+---
+
+## 🔑 授權機制（開發者用）
+
+授權序號是對「硬體識別碼 (HWID)」做的 **Ed25519 簽章**。程式內只有公鑰（`license-public.json`），因此即使有人拿到安裝檔，也只能驗證序號，**無法產生序號**。
+
+```bash
+# 1. 第一次使用：建立金鑰對（私鑰 license-private.pem 已加入 .gitignore，請自行備份！）
+node tools/license.js init
+
+# 2. 替客戶簽發序號（HWID 為客戶授權視窗上顯示的識別碼）
+node tools/license.js sign <HWID>
+```
+
+- 遺失 `license-private.pem` 就無法再簽發序號；重新 `init` 會讓舊序號全部失效。
+- 打包前請確認 `license-public.json` 已存在（打包設定已包含它）。
+- 瀏覽器開發模式需要支援 Web Crypto Ed25519 的瀏覽器（Chrome / Edge 137+、Firefox 129+）。

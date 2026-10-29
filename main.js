@@ -56,44 +56,62 @@ function getHardwareID() {
     return hwidPromise;
 }
 
-function generateKey(hwid) {
-    if (!hwid || hwid === "UNKNOWN-HWID") return null;
-    
-    // Obfuscated Salt parts to prevent simple string recovery
-    const _p1 = "PhotoEditorPRO";
-    const _p2 = "Licensing";
-    const _p3 = "System";
-    const _p4 = "SecretSalt";
-    const _p5 = "2026_@#$!";
-    const salt = [_p1, _p2, _p3, _p4, _p5].join("_");
+// ---- License verification ----
+// A license key is an Ed25519 signature of the hardware ID (Base32, grouped by 5). Only the public key
+// ships with the app (license-public.json); keys are issued with tools/license.js and the private key.
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-    // Phase 1: SHA256 of hwid + salt (lowercase hex format)
-    const input1 = hwid + salt;
-    const hash1 = crypto.createHash('sha256').update(input1, 'utf8').digest('hex').toLowerCase();
-    
-    // Phase 2: Reverse hash1 to make reverse engineering harder
-    const reversedHash1 = hash1.split('').reverse().join('');
-    
-    // Phase 3: SHA256 of reversedHash1 + salt + hwid (uppercase hex format)
-    const input2 = reversedHash1 + salt + hwid;
-    const hash2 = crypto.createHash('sha256').update(input2, 'utf8').digest('hex').toUpperCase();
-    
-    // Phase 4: Format as XXXXX-XXXXX-XXXXX-XXXXX
-    const cleanHex = hash2.substring(0, 20);
-    let serial = "";
-    for (let i = 0; i < cleanHex.length; i += 5) {
-        if (i > 0) serial += "-";
-        serial += cleanHex.substring(i, i + 5);
+function decodeBase32(text) {
+    let bits = 0, value = 0;
+    const out = [];
+    for (const ch of text) {
+        const idx = BASE32_ALPHABET.indexOf(ch);
+        if (idx < 0) return null;
+        value = (value << 5) | idx;
+        bits += 5;
+        if (bits >= 8) {
+            out.push((value >>> (bits - 8)) & 255);
+            bits -= 8;
+        }
     }
-    return serial;
+    return Buffer.from(out);
+}
+
+function normalizeKey(key) {
+    return typeof key === 'string' ? key.replace(/[\s-]+/g, '').toUpperCase() : '';
+}
+
+let cachedPublicKey;
+function getPublicKey() {
+    if (cachedPublicKey !== undefined) return cachedPublicKey;
+    try {
+        const file = path.join(__dirname, 'license-public.json');
+        const { publicKey } = JSON.parse(fs.readFileSync(file, 'utf8'));
+        cachedPublicKey = crypto.createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
+    } catch (e) {
+        console.error('License public key unavailable:', e.message);
+        cachedPublicKey = null;
+    }
+    return cachedPublicKey;
+}
+
+function verifyKey(hwid, key) {
+    if (!hwid || hwid === "UNKNOWN-HWID") return false;
+    const publicKey = getPublicKey();
+    const signature = decodeBase32(normalizeKey(key));
+    if (!publicKey || !signature || signature.length !== 64) return false;
+    try {
+        return crypto.verify(null, Buffer.from(hwid, 'utf8'), publicKey, signature);
+    } catch (e) {
+        return false;
+    }
 }
 
 async function isLicenseValid() {
     if (!fs.existsSync(licenseFile)) return false;
     try {
         const data = JSON.parse(fs.readFileSync(licenseFile, 'utf8'));
-        const expectedKey = generateKey(await getHardwareID());
-        return !!expectedKey && !!data && data.key === expectedKey;
+        return !!data && verifyKey(await getHardwareID(), data.key);
     } catch (e) {
         return false;
     }
@@ -198,17 +216,14 @@ if (!gotTheLock) {
         
         ipcMain.handle('verify-and-save', async (event, key) => {
             const hwid = await getHardwareID();
-            const expected = generateKey(hwid);
-            if (expected && typeof key === 'string' && key.trim().toUpperCase() === expected) {
-                try {
-                    fs.writeFileSync(licenseFile, JSON.stringify({ key: key.trim().toUpperCase() }), 'utf8');
-                    return true;
-                } catch (e) {
-                    console.error("Failed to write license file:", e);
-                    return false;
-                }
+            if (!verifyKey(hwid, key)) return false;
+            try {
+                fs.writeFileSync(licenseFile, JSON.stringify({ key: normalizeKey(key) }), 'utf8');
+                return true;
+            } catch (e) {
+                console.error("Failed to write license file:", e);
+                return false;
             }
-            return false;
         });
 
         createWindow();

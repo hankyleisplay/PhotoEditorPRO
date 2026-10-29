@@ -130,6 +130,8 @@ const state = {
     outputImageData: null,         // Reusable output buffer for render()
     presetAnimation: null,         // Active slider animation timer
     previewRebuildPending: false,
+    previewMaxDim: 1200,                  // Current preview resolution (raised while zoomed in)
+    detailTimer: null,
     sourceUrl: null,               // Object URL of the loaded file (revoked on replace)
     
     // User saved presets (persisted in localStorage)
@@ -137,7 +139,8 @@ const state = {
 };
 
 // Constants
-const MAX_PREVIEW_DIMENSION = 1200; // Limit preview size for real-time 60fps editing
+const MAX_PREVIEW_DIMENSION = 1200; // Base preview size for real-time 60fps editing
+const MAX_DETAIL_DIMENSION = 2400;  // Upper bound when the preview is re-rendered sharper while zoomed in
 const MAX_EXPORT_PIXELS = 120 * 1000 * 1000; // Safety cap so huge exports do not exhaust canvas memory
 const MAX_EXPORT_SIDE = 16384;               // Chromium canvas side limit
 const MIN_ZOOM = 5;
@@ -261,36 +264,40 @@ const PRESETS = {
  * INITIALIZATION & EVENT LISTENERS
  * ========================================== */
 
-// Browser-based SHA-256 and License Key generation for web fallback
-async function generateBrowserKey(hwid) {
-    const _p1 = "PhotoEditorPRO";
-    const _p2 = "Licensing";
-    const _p3 = "System";
-    const _p4 = "SecretSalt";
-    const _p5 = "2026_@#$!";
-    const salt = [_p1, _p2, _p3, _p4, _p5].join("_");
+// Browser fallback (dev server / web): verifies an Ed25519 license signature with the public key only.
+// Needs a browser with Ed25519 in Web Crypto; the desktop app verifies in the main process instead.
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-    // Phase 1: SHA256 of hwid + salt (lowercase hex format)
-    const msg1 = new TextEncoder().encode(hwid + salt);
-    const buf1 = await crypto.subtle.digest('SHA-256', msg1);
-    const hash1 = Array.from(new Uint8Array(buf1)).map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
-    
-    // Phase 2: Reverse hash1
-    const reversedHash1 = hash1.split('').reverse().join('');
-    
-    // Phase 3: SHA256 of reversedHash1 + salt + hwid (uppercase hex format)
-    const msg2 = new TextEncoder().encode(reversedHash1 + salt + hwid);
-    const buf2 = await crypto.subtle.digest('SHA-256', msg2);
-    const hash2 = Array.from(new Uint8Array(buf2)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-    
-    // Phase 4: Format as XXXXX-XXXXX-XXXXX-XXXXX
-    const cleanHex = hash2.substring(0, 20);
-    let serial = "";
-    for (let i = 0; i < cleanHex.length; i += 5) {
-        if (i > 0) serial += "-";
-        serial += cleanHex.substring(i, i + 5);
+function decodeBase32(text) {
+    let bits = 0, value = 0;
+    const out = [];
+    for (const ch of text) {
+        const idx = BASE32_ALPHABET.indexOf(ch);
+        if (idx < 0) return null;
+        value = (value << 5) | idx;
+        bits += 5;
+        if (bits >= 8) {
+            out.push((value >>> (bits - 8)) & 255);
+            bits -= 8;
+        }
     }
-    return serial;
+    return new Uint8Array(out);
+}
+
+async function verifyBrowserKey(hwid, key) {
+    try {
+        const signature = decodeBase32(String(key).replace(/[\s-]+/g, '').toUpperCase());
+        if (!signature || signature.length !== 64) return false;
+        const response = await fetch('license-public.json', { cache: 'no-store' });
+        if (!response.ok) return false;
+        const { publicKey } = await response.json();
+        const der = Uint8Array.from(atob(publicKey), c => c.charCodeAt(0));
+        const cryptoKey = await crypto.subtle.importKey('spki', der, { name: 'Ed25519' }, false, ['verify']);
+        return await crypto.subtle.verify({ name: 'Ed25519' }, cryptoKey, signature, new TextEncoder().encode(hwid));
+    } catch (e) {
+        console.error('Browser license verification failed:', e);
+        return false;
+    }
 }
 
 // License Validation Flow
@@ -315,8 +322,7 @@ async function checkLicense() {
         // Browser Fallback (e.g. development server)
         hwid = "BROWSER-MODE-DEMO-HWID-2026";
         const savedKey = safeStorageGet('license_key');
-        const expectedKey = await generateBrowserKey(hwid);
-        isLicensed = (savedKey === expectedKey);
+        isLicensed = !!savedKey && await verifyBrowserKey(hwid, savedKey);
     }
 
     if (isLicensed) {
@@ -360,8 +366,7 @@ async function checkLicense() {
             if (window.licenseAPI) {
                 success = await window.licenseAPI.verifyAndSave(key);
             } else {
-                const expectedKey = await generateBrowserKey(hwid);
-                if (key === expectedKey) {
+                if (await verifyBrowserKey(hwid, key)) {
                     safeStorageSet('license_key', key);
                     success = true;
                 }
@@ -1240,6 +1245,8 @@ function setupImages(img) {
     state.isComparing = false;
     state.zoom = 100;
     state.pan = { x: 0, y: 0 };
+    state.previewMaxDim = MAX_PREVIEW_DIMENSION;
+    clearTimeout(state.detailTimer);
     rebuildPreview();
     
     // History setup
@@ -1480,7 +1487,7 @@ function getBlurData(sourceCanvas, radius) {
 
 function getBlurredPreview() {
     if (!state.blurCache) {
-        state.blurCache = getBlurData(state.previewCanvas, 1.5);
+        state.blurCache = getBlurData(state.previewCanvas, getBlurRadius(Math.max(state.previewWidth, state.previewHeight)));
     }
     return state.blurCache;
 }
@@ -1984,9 +1991,53 @@ function applyFilterPipelineJS(srcData, dstData, adj, blurred = null) {
  * ZOOM & PAN SYSTEM
  * ========================================== */
 
+function getTrueZoom() {
+    if (!state.originalImage || !state.previewWidth) return state.zoom;
+    return state.zoom * state.previewWidth / getFinalSize().w;
+}
+
+// Blur radius used for sharpening / noise reduction. 1.5px at the 1200px reference size, scaled with the
+// canvas so the effect looks the same in the preview, the zoomed-in detail preview and the export.
+function getBlurRadius(canvasMaxSide) {
+    const fullSize = getFinalSize();
+    const reference = Math.min(Math.max(fullSize.w, fullSize.h), MAX_PREVIEW_DIMENSION);
+    return Math.max(0.5, 1.5 * canvasMaxSide / reference);
+}
+
+// While zoomed in, the preview is re-rendered at a higher resolution so detail stays sharp.
+// Hysteresis avoids flip-flopping; the on-screen size is kept constant by rescaling `zoom`.
+function scheduleDetailUpdate() {
+    clearTimeout(state.detailTimer);
+    state.detailTimer = setTimeout(updatePreviewDetail, 220);
+}
+
+function updatePreviewDetail() {
+    if (!state.originalImage || state.isCropMode || state.isComparing) return;
+    const fullSize = getFinalSize();
+    const fullMax = Math.max(fullSize.w, fullSize.h);
+    const displayedMax = Math.max(state.previewWidth, state.previewHeight) * state.zoom / 100;
+    const wanted = clamp(Math.ceil(displayedMax * (window.devicePixelRatio || 1)),
+        MAX_PREVIEW_DIMENSION, Math.min(fullMax, MAX_DETAIL_DIMENSION));
+    const current = state.previewMaxDim;
+    if (!(wanted > current * 1.25 || wanted < current / 1.5)) return;
+    if (wanted === current) return;
+    
+    const oldWidth = state.previewWidth;
+    state.previewMaxDim = wanted;
+    rebuildPreview();
+    state.zoom *= oldWidth / state.previewWidth;
+    // Swap without the CSS transition so the (visually identical) change does not animate
+    canvasWrapper.style.transition = 'none';
+    updateCanvasTransform();
+    void canvasWrapper.offsetWidth;
+    canvasWrapper.style.transition = '';
+    render(); // paint the new resolution immediately instead of one frame later
+}
+
 function updateCanvasTransform() {
     canvasWrapper.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom / 100})`;
-    zoomDisplay.textContent = `${Math.round(state.zoom)}%`;
+    // The label shows the scale relative to the real image, not to the (down-scaled) preview
+    zoomDisplay.textContent = `${Math.round(getTrueZoom())}%`;
     
     if (state.zoom > 100 || !state.isFit) {
         canvasWrapper.classList.add('grab-mode');
@@ -2015,6 +2066,7 @@ function zoomTo(newZoom, clientX, clientY) {
     state.isFit = false;
     
     updateCanvasTransform();
+    scheduleDetailUpdate();
 }
 
 // Multiplicative zoom step (each click/keypress changes the size by the same visual amount)
@@ -2026,13 +2078,15 @@ function toggleZoomFit() {
     if (!state.originalImage) return;
     
     if (state.isFit) {
+        // True 100% (one screen pixel per image pixel); the detail preview follows once it settles
         state.isFit = false;
-        state.zoom = 100;
+        state.zoom = 100 * getFinalSize().w / state.previewWidth;
         state.pan = { x: 0, y: 0 };
+        updateCanvasTransform();
+        scheduleDetailUpdate();
     } else {
         fitImageToViewport();
     }
-    updateCanvasTransform();
 }
 
 function fitImageToViewport() {
@@ -2041,6 +2095,13 @@ function fitImageToViewport() {
     const vw = viewport.clientWidth - 80;
     const vh = viewport.clientHeight - 80;
     if (vw <= 0 || vh <= 0) return; // viewport hidden / not laid out yet
+    
+    // Fitting needs no extra detail: go back to the base preview resolution
+    if (state.previewMaxDim !== MAX_PREVIEW_DIMENSION && !state.isCropMode) {
+        clearTimeout(state.detailTimer);
+        state.previewMaxDim = MAX_PREVIEW_DIMENSION;
+        rebuildPreview();
+    }
     
     const wRatio = vw / state.previewWidth;
     const hRatio = vh / state.previewHeight;
@@ -2408,13 +2469,10 @@ async function exportImage({ mime, quality, scale, mode }) {
         const srcImageData = exportCtx.getImageData(0, 0, w, h);
         const dstImageData = exportCtx.createImageData(w, h);
         
-        // The preview blur radius (1.5px at preview size) is scaled so sharpening looks the same at full size
+        // The blur radius scales with the canvas so sharpening looks the same at full size
         let blurredData = null;
         if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
-            const fullSize = getFinalSize();
-            const previewScale = Math.min(1, MAX_PREVIEW_DIMENSION / Math.max(fullSize.w, fullSize.h));
-            const radius = Math.max(0.5, 1.5 * (safeScale / previewScale));
-            blurredData = getBlurData(exportCanvas, radius);
+            blurredData = getBlurData(exportCanvas, getBlurRadius(Math.max(w, h)));
         }
         
         applyFilterPipeline(srcImageData, dstImageData, state.adjustments, blurredData);
@@ -3184,7 +3242,7 @@ function resetActiveCropBox() {
 // using the current crop / rotate / straighten / flip settings. Returns true if its size changed.
 function rebuildPreview() {
     const canvas = getCroppedCanvas(state.originalImage, {
-        maxDim: MAX_PREVIEW_DIMENSION,
+        maxDim: state.isCropMode ? MAX_PREVIEW_DIMENSION : state.previewMaxDim,
         ignoreCrop: state.isCropMode
     });
     const sizeChanged = canvas.width !== state.previewWidth || canvas.height !== state.previewHeight;
@@ -3499,7 +3557,7 @@ function drawWatermark(ctx, width, height, adj) {
     
     // Scale text size proportional to the image width
     const baseSize = Math.max(12, Math.round(width * 0.02 * (adj.watermarkSize / 50)));
-    ctx.font = `500 ${baseSize}px 'Plus Jakarta Sans', 'Noto Sans TC', sans-serif`;
+    ctx.font = `500 ${baseSize}px 'Plus Jakarta Sans', 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans CJK TC', sans-serif`;
     
     // Watermark color & opacity
     ctx.fillStyle = adj.watermarkColor || '#ffffff';

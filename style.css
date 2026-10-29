@@ -1,3 +1,39 @@
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 300;
+    font-display: swap;
+    src: url('fonts/plus-jakarta-sans-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('fonts/plus-jakarta-sans-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url('fonts/plus-jakarta-sans-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url('fonts/plus-jakarta-sans-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('fonts/plus-jakarta-sans-latin-700-normal.woff2') format('woff2');
+}
+
 /* CSS Custom Properties for Modern Palette & Theme */
 :root {
     --bg-darker: #090b0e;
@@ -38,7 +74,7 @@
     box-sizing: border-box;
     margin: 0;
     padding: 0;
-    font-family: 'Plus Jakarta Sans', 'Noto Sans TC', sans-serif;
+    font-family: 'Plus Jakarta Sans', 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', 'Noto Sans CJK TC', 'Heiti TC', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }

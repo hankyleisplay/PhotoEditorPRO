@@ -3,12 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' blob: data: ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' blob: data: ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Photo Editor PRO - 專業級線上相片編輯器</title>
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <!-- Lucide Icons -->
     <script src="lucide.min.js"></script>
     <link rel="stylesheet" href="style.css">
@@ -735,7 +731,7 @@
 
                 <div class="license-info-group">
                     <label for="input-license-key">請輸入授權序號 (License Key):</label>
-                    <input type="text" id="input-license-key" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off">
+                    <input type="text" id="input-license-key" placeholder="貼上您的授權序號（XXXXX-XXXXX-XXXXX-…）" autocomplete="off">
                 </div>
 
                 <div id="license-error-msg" class="error-msg" style="display: none;">
@@ -834,8 +830,9 @@
                     <br>
                     • <b>Lucide Icons</b> - Copyright © Lucide Contributors. (ISC License)
                     <br>
-                    • <b>Plus Jakarta Sans</b> - Copyright © Gumpita Rahayu. (OFL)
-                    • <b>Noto Sans TC</b> - Copyright © Google Inc. (OFL)
+                    • <b>Plus Jakarta Sans</b> - Copyright © Gumpita Rahayu. (OFL，隨程式內建，離線可用)
+                    <br>
+                    • 中文字型使用系統內建字型（微軟正黑體 / 蘋方 / Noto Sans CJK 等）
                 </p>
             </div>
             <div class="modal-footer" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 12px; display: flex; justify-content: flex-end;">
