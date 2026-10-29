@@ -2,5 +2,4 @@
 dist/
 target/
 src-rust/target/
-dist-secure/
 build/portable/
