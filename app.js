@@ -619,7 +619,16 @@ function setupLegalModal() {
     const btnLegal = document.getElementById('btn-legal');
     const btnCloseLegal = document.getElementById('btn-close-legal');
     const btnLegalConfirm = document.getElementById('btn-legal-confirm');
-    
+    const btnCheckUpdate = document.getElementById('btn-check-update');
+
+    // Only the desktop app can update itself; the web/dev version has no updater.
+    if (btnCheckUpdate && window.updateAPI) {
+        btnCheckUpdate.style.display = '';
+        btnCheckUpdate.addEventListener('click', () => {
+            window.updateAPI.checkForUpdates();
+        });
+    }
+
     if (btnLegal && legalOverlay) {
         btnLegal.addEventListener('click', () => {
             legalOverlay.style.display = 'flex';
@@ -674,6 +683,7 @@ function init() {
     setupFrames();
     setupCustomPresets();
     setupExportDialog();
+    setupBatchDialog();
     setupLegalModal();
 
     recomputeAllCurveLUTs();
@@ -2311,6 +2321,32 @@ function downloadHighResImage() {
     if (typeof window.openExportDialog === 'function') window.openExportDialog();
 }
 
+// Runs the current adjustments, watermark and frame over a canvas in place (shared by export and batch).
+function applyEditsToCanvas(canvas) {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const w = canvas.width;
+    const h = canvas.height;
+
+    const srcImageData = ctx.getImageData(0, 0, w, h);
+    const dstImageData = ctx.createImageData(w, h);
+
+    // The blur radius scales with the canvas so sharpening looks the same at full size
+    let blurredData = null;
+    if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
+        blurredData = getBlurData(canvas, getBlurRadius(Math.max(w, h)));
+    }
+
+    applyFilterPipeline(srcImageData, dstImageData, state.adjustments, blurredData);
+    ctx.putImageData(dstImageData, 0, 0);
+
+    if (state.adjustments.watermarkText) {
+        drawWatermark(ctx, w, h, state.adjustments);
+    }
+    if (state.activeFrame && state.activeFrame !== 'none') {
+        drawFrame(ctx, w, h, state.activeFrame);
+    }
+}
+
 function canvasToBlob(canvas, mime, quality) {
     return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
 }
@@ -2333,28 +2369,7 @@ async function exportImage({ mime, quality, scale, mode }) {
         const w = exportCanvas.width;
         const h = exportCanvas.height;
         
-        const srcImageData = exportCtx.getImageData(0, 0, w, h);
-        const dstImageData = exportCtx.createImageData(w, h);
-        
-        // The blur radius scales with the canvas so sharpening looks the same at full size
-        let blurredData = null;
-        if (state.adjustments.sharpening > 0 || state.adjustments.noiseReduction > 0) {
-            blurredData = getBlurData(exportCanvas, getBlurRadius(Math.max(w, h)));
-        }
-        
-        applyFilterPipeline(srcImageData, dstImageData, state.adjustments, blurredData);
-        
-        exportCtx.putImageData(dstImageData, 0, 0);
-        
-        // Draw watermark if configured
-        if (state.adjustments.watermarkText) {
-            drawWatermark(exportCtx, w, h, state.adjustments);
-        }
-        
-        // Draw artistic frame if configured
-        if (state.activeFrame && state.activeFrame !== 'none') {
-            drawFrame(exportCtx, w, h, state.activeFrame);
-        }
+        applyEditsToCanvas(exportCanvas);
         
         // JPEG has no alpha channel: composite over white instead of letting transparency turn black
         const targetMime = mode === 'copy' ? 'image/png' : mime;
@@ -3462,6 +3477,258 @@ function drawWatermark(ctx, width, height, adj) {
     
     ctx.fillText(adj.watermarkText, x, y);
     ctx.restore();
+}
+
+/* ==========================================
+ * BATCH PROCESSING
+ * ========================================== */
+
+// Minimal ZIP writer (STORE method: photos are already compressed). Returns a Blob.
+const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        table[n] = c >>> 0;
+    }
+    return table;
+})();
+
+function crc32(bytes) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildZip(entries) {
+    const encoder = new TextEncoder();
+    const now = new Date();
+    const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const parts = [];
+    const central = [];
+    let offset = 0;
+
+    for (const { name, data } of entries) {
+        const nameBytes = encoder.encode(name);
+        const crc = crc32(data);
+
+        const local = new DataView(new ArrayBuffer(30));
+        local.setUint32(0, 0x04034b50, true);
+        local.setUint16(4, 20, true);
+        local.setUint16(6, 0x0800, true); // UTF-8 file names
+        local.setUint16(8, 0, true);      // stored
+        local.setUint16(10, dosTime, true);
+        local.setUint16(12, dosDate, true);
+        local.setUint32(14, crc, true);
+        local.setUint32(18, data.length, true);
+        local.setUint32(22, data.length, true);
+        local.setUint16(26, nameBytes.length, true);
+        parts.push(local.buffer, nameBytes, data);
+
+        const cen = new DataView(new ArrayBuffer(46));
+        cen.setUint32(0, 0x02014b50, true);
+        cen.setUint16(4, 20, true);
+        cen.setUint16(6, 20, true);
+        cen.setUint16(8, 0x0800, true);
+        cen.setUint16(10, 0, true);
+        cen.setUint16(12, dosTime, true);
+        cen.setUint16(14, dosDate, true);
+        cen.setUint32(16, crc, true);
+        cen.setUint32(20, data.length, true);
+        cen.setUint32(24, data.length, true);
+        cen.setUint16(28, nameBytes.length, true);
+        cen.setUint32(42, offset, true);
+        central.push(cen.buffer, nameBytes);
+
+        offset += 30 + nameBytes.length + data.length;
+    }
+
+    let centralSize = 0;
+    for (const p of central) centralSize += p.byteLength;
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, entries.length, true);
+    end.setUint16(10, entries.length, true);
+    end.setUint32(12, centralSize, true);
+    end.setUint32(16, offset, true);
+
+    return new Blob([...parts, ...central, end.buffer], { type: 'application/zip' });
+}
+
+// Applies the current look (adjustments, watermark, frame) to many photos and saves them as one ZIP.
+// Crop / rotate / straighten are per-photo and are not applied.
+function setupBatchDialog() {
+    const overlay = document.getElementById('batch-overlay');
+    const btnOpen = document.getElementById('btn-batch');
+    if (!overlay || !btnOpen) return;
+
+    const btnPick = document.getElementById('btn-batch-pick');
+    const fileInput = document.getElementById('batch-file-input');
+    const summary = document.getElementById('batch-summary');
+    const selFormat = document.getElementById('batch-format');
+    const rngQuality = document.getElementById('batch-quality');
+    const qualityVal = document.getElementById('batch-quality-val');
+    const qualityRow = document.getElementById('batch-quality-row');
+    const selScale = document.getElementById('batch-scale');
+    const progress = document.getElementById('batch-progress');
+    const btnStart = document.getElementById('btn-batch-start');
+    const btnCancel = document.getElementById('btn-batch-cancel');
+    const btnClose = document.getElementById('btn-close-batch');
+
+    let files = [];
+    let running = false;
+    let cancelRequested = false;
+
+    const refresh = () => {
+        qualityRow.style.display = EXPORT_FORMATS[selFormat.value].lossy ? '' : 'none';
+        qualityVal.textContent = rngQuality.value;
+        summary.textContent = files.length ? `已選擇 ${files.length} 張相片` : '尚未選擇相片';
+        btnStart.disabled = running || files.length === 0;
+    };
+
+    const close = () => {
+        if (running) return;
+        overlay.style.display = 'none';
+    };
+
+    const uniqueName = (used, base, ext) => {
+        let name = `${base}.${ext}`;
+        for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base}-${n}.${ext}`;
+        used.add(name.toLowerCase());
+        return name;
+    };
+
+    const run = async () => {
+        if (running || !files.length) return;
+        running = true;
+        cancelRequested = false;
+        btnStart.disabled = true;
+        btnPick.disabled = true;
+        btnClose.disabled = true;
+        btnCancel.textContent = '停止';
+
+        const mime = selFormat.value;
+        const quality = parseInt(rngQuality.value) / 100;
+        const requested = parseFloat(selScale.value);
+        safeStorageSet(EXPORT_SETTINGS_KEY, JSON.stringify({ format: mime, quality: parseInt(rngQuality.value), scale: requested }));
+
+        const entries = [];
+        const used = new Set();
+        const failed = [];
+
+        for (let i = 0; i < files.length; i++) {
+            if (cancelRequested) break;
+            const file = files[i];
+            progress.textContent = `處理中 ${i + 1} / ${files.length}：${file.name}`;
+            // Let the progress text paint between photos
+            await new Promise(r => setTimeout(r, 20));
+
+            let img = null;
+            try {
+                img = await decodeImageFile(file);
+                let scale = requested;
+                if (img.width * img.height * scale * scale > MAX_EXPORT_PIXELS) scale = Math.sqrt(MAX_EXPORT_PIXELS / (img.width * img.height));
+                if (Math.max(img.width, img.height) * scale > MAX_EXPORT_SIDE) scale = MAX_EXPORT_SIDE / Math.max(img.width, img.height);
+
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(img.width * scale));
+                canvas.height = Math.max(1, Math.round(img.height * scale));
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+                applyEditsToCanvas(canvas);
+
+                if (mime === 'image/jpeg') {
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'destination-over';
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.restore();
+                }
+
+                const blob = await canvasToBlob(canvas, mime, quality);
+                if (!blob || blob.type !== mime) throw new Error('encode failed');
+
+                const dot = file.name.lastIndexOf('.');
+                const base = ((dot > 0 ? file.name.substring(0, dot) : file.name) || 'photo').replace(/[\\/:*?"<>|]+/g, '_');
+                entries.push({
+                    name: uniqueName(used, `${base}-edited`, EXPORT_FORMATS[mime].ext),
+                    data: new Uint8Array(await blob.arrayBuffer())
+                });
+            } catch (e) {
+                console.error('Batch item failed:', file.name, e);
+                failed.push(file.name);
+            } finally {
+                if (img && typeof img.close === 'function') img.close();
+            }
+        }
+
+        if (entries.length) {
+            const url = URL.createObjectURL(buildZip(entries));
+            const link = document.createElement('a');
+            link.download = `photo-editor-batch-${entries.length}.zip`;
+            link.href = url;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+        }
+
+        const stopped = cancelRequested;
+        running = false;
+        btnPick.disabled = false;
+        btnClose.disabled = false;
+        btnCancel.textContent = '關閉';
+
+        if (entries.length) {
+            progress.textContent = `完成：已儲存 ${entries.length} 張` + (failed.length ? `，${failed.length} 張失敗` : '') + (stopped ? '（已提前停止）' : '');
+            showToast(failed.length ? `批次完成，${failed.length} 張處理失敗` : '批次處理完成', failed.length ? 'info' : 'success');
+        } else {
+            progress.textContent = stopped ? '已停止' : '沒有成功處理任何相片';
+            if (!stopped) showToast('批次處理失敗', 'error');
+        }
+        refresh();
+    };
+
+    btnOpen.addEventListener('click', () => {
+        if (!state.originalImage) {
+            showToast('請先開啟一張相片並調整出想要的效果', 'error');
+            return;
+        }
+        if (state.isCropMode) {
+            showToast('請先套用或取消裁切', 'error');
+            return;
+        }
+        const saved = loadExportSettings();
+        selFormat.value = saved.format || 'image/jpeg';
+        rngQuality.value = saved.quality;
+        selScale.value = String(saved.scale);
+        progress.textContent = '';
+        refresh();
+        overlay.style.display = 'flex';
+    });
+
+    btnPick.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        files = Array.from(fileInput.files || []).filter(isImageFile);
+        fileInput.value = '';
+        progress.textContent = '';
+        refresh();
+    });
+    selFormat.addEventListener('change', refresh);
+    rngQuality.addEventListener('input', refresh);
+    btnStart.addEventListener('click', run);
+    btnCancel.addEventListener('click', () => {
+        if (running) cancelRequested = true;
+        else close();
+    });
+    btnClose.addEventListener('click', close);
+    overlay.addEventListener('mousedown', (e) => {
+        if (e.target === overlay) close();
+    });
 }
 
 // Kickstart Application

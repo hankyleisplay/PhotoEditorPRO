@@ -1,5 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+contextBridge.exposeInMainWorld('updateAPI', {
+    checkForUpdates: () => ipcRenderer.invoke('check-for-updates')
+});
+
 contextBridge.exposeInMainWorld('wasmAPI', {
     loadWasm: () => ipcRenderer.invoke('load-wasm')
 });

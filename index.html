@@ -612,6 +612,9 @@
                         <i data-lucide="eye"></i>
                         <span>比較原圖</span>
                     </button>
+                    <button class="btn btn-secondary" id="btn-batch" title="批次處理：把目前的調整套用到多張相片" aria-label="批次處理">
+                        <i data-lucide="images"></i>
+                    </button>
                     <button class="btn btn-primary" id="btn-download" title="儲存相片 (Ctrl+S)" disabled>
                         <i data-lucide="download"></i>
                         <span>儲存相片</span>
@@ -755,6 +758,57 @@
         </div>
     </div>
 
+    <!-- Batch Processing Modal Overlay -->
+    <div id="batch-overlay" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="batch-title">
+        <div class="modal-content export-modal animate-scale-in">
+            <div class="modal-header">
+                <h2 id="batch-title">批次處理</h2>
+                <button class="modal-close" id="btn-close-batch" aria-label="關閉">&times;</button>
+            </div>
+            <div class="modal-body export-body">
+                <p class="export-size-info">將目前的調整、浮水印與相框套用到多張相片，並打包成一個 ZIP 下載。裁切與旋轉不會套用。</p>
+                <div class="export-row">
+                    <label>相片</label>
+                    <button class="btn btn-secondary" id="btn-batch-pick">
+                        <i data-lucide="folder-open"></i>
+                        <span>選擇相片…</span>
+                    </button>
+                    <input type="file" id="batch-file-input" accept="image/*" multiple hidden>
+                </div>
+                <p class="export-size-info" id="batch-summary">尚未選擇相片</p>
+                <div class="export-row">
+                    <label for="batch-format">檔案格式</label>
+                    <select id="batch-format" class="export-select">
+                        <option value="image/jpeg">JPEG（相片，檔案小）</option>
+                        <option value="image/png">PNG（無損，檔案大）</option>
+                        <option value="image/webp">WebP（高壓縮率）</option>
+                    </select>
+                </div>
+                <div class="export-row" id="batch-quality-row">
+                    <label for="batch-quality">品質 <span class="val-display" id="batch-quality-val">92</span></label>
+                    <input type="range" id="batch-quality" min="50" max="100" value="92" step="1">
+                </div>
+                <div class="export-row">
+                    <label for="batch-scale">輸出大小</label>
+                    <select id="batch-scale" class="export-select">
+                        <option value="1">原始尺寸 (100%)</option>
+                        <option value="0.75">75%</option>
+                        <option value="0.5">50%</option>
+                        <option value="0.25">25%</option>
+                    </select>
+                </div>
+                <p class="export-size-info" id="batch-progress" aria-live="polite"></p>
+            </div>
+            <div class="export-actions">
+                <button class="btn btn-secondary" id="btn-batch-cancel">關閉</button>
+                <button class="btn btn-primary" id="btn-batch-start" disabled>
+                    <i data-lucide="play"></i>
+                    <span>開始處理</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Legal Notice Modal Overlay -->
     <div id="legal-overlay" class="modal-overlay" style="display: none;">
         <div class="modal-content legal-modal animate-scale-in" style="width: 520px; max-height: 85vh; display: flex; flex-direction: column; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 28px; box-shadow: 0 20px 50px rgba(0,0,0,0.6);">
@@ -766,7 +820,7 @@
                 <button class="modal-close" id="btn-close-legal" style="background: transparent; border: none; color: var(--text-muted); font-size: 1.4rem; cursor: pointer; transition: var(--transition-fast);">&times;</button>
             </div>
             <div class="modal-body" style="overflow-y: auto; flex: 1; padding-right: 8px; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
-                <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Photo Editor PRO v1.2.0</h3>
+                <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Photo Editor PRO v1.3.0</h3>
                 <p style="margin-bottom: 16px;">
                     本軟體是一款專為攝影愛好者與專業設計師打造的相片編輯器。所有核心影像處理演算法皆採用 <b>Rust</b> 編寫並編譯為 <b>WebAssembly</b> 進行高速硬體加速以提供最優異的性能表現。本軟體免費且開源，歡迎自由使用、研究與修改。
                 </p>
@@ -790,6 +844,7 @@
                 </p>
             </div>
             <div class="modal-footer" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 12px; display: flex; justify-content: flex-end;">
+                <button class="btn btn-secondary" id="btn-check-update" style="padding: 8px 20px; font-size: 0.8rem; margin-right: 8px; display: none;">檢查更新</button>
                 <button class="btn btn-primary" id="btn-legal-confirm" style="padding: 8px 20px; font-size: 0.8rem;">關閉</button>
             </div>
         </div>
