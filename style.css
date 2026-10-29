@@ -475,6 +475,52 @@ input[type="range"]::-webkit-slider-thumb:hover {
     gap: 8px;
 }
 
+/* The workspace and viewport must be allowed to shrink below their content, otherwise a large
+   canvas pushes the toolbar (and the save button) past the right edge of the window. */
+.workspace,
+.canvas-viewport {
+    min-width: 0;
+}
+
+.toolbar-left, .toolbar-right {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+/* Narrower windows: icon-only secondary buttons (they keep their tooltips) and tighter spacing */
+@media (max-width: 1500px) {
+    .toolbar {
+        padding: 0 16px;
+    }
+    .toolbar-left, .toolbar-right {
+        gap: 6px;
+    }
+    .toolbar-right .btn-secondary span {
+        display: none;
+    }
+    .toolbar-right .btn-secondary {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+}
+
+@media (max-width: 1180px) {
+    .toolbar .image-dimensions,
+    .toolbar-left .divider {
+        display: none;
+    }
+    .toolbar-right .divider {
+        margin: 0 2px;
+    }
+    .toolbar-right #btn-download span {
+        display: none;
+    }
+    .toolbar-right #btn-download {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+}
+
 .divider {
     width: 1px;
     height: 20px;
