@@ -39,6 +39,21 @@
 6. **免安裝即用範例**
    - 內建一幅精美的「日落山景」範例圖片，一鍵即可載入進行測試。
 
+7. **匯出對話框 (Export)**
+   - 可選擇 **JPEG / PNG / WebP** 格式、品質 (50–100) 與輸出尺寸 (100% / 75% / 50% / 25%)，並即時顯示輸出像素。
+   - 一鍵 **複製到剪貼簿**（PNG），可直接貼到聊天軟體或其他編輯器。
+   - 超過瀏覽器畫布上限的超大圖片會自動縮小並提示，不會再失敗或當機。
+
+8. **自訂預設 (My Presets)**
+   - 將目前的調整存成自己的預設（儲存在本機），可隨時套用、搭配「濾鏡強度」混合或刪除。
+
+9. **更方便的載入方式**
+   - 將相片拖曳到視窗 **任何位置**（編輯中也可直接換圖）、`Ctrl + V` 貼上剪貼簿圖片、`Ctrl + O` 開啟檔案。
+
+10. **細節操作**
+    - **雙擊任一滑桿**（或其標籤）即可單獨重設該項目。
+    - 滾輪縮放以 **游標位置為中心**，每一步縮放比例一致。
+
 ---
 
 ## 🚀 快速開始
@@ -76,11 +91,16 @@
 ## ⌨️ 快捷鍵支援
 
 - `Ctrl + Z`：還原 (Undo)
-- `Ctrl + Y`：重做 (Redo)
+- `Ctrl + Y` / `Ctrl + Shift + Z`：重做 (Redo)
+- `Ctrl + S`：開啟儲存（匯出）對話框
+- `Ctrl + O`：開啟相片檔案
+- `Ctrl + V`：貼上剪貼簿中的圖片
 - `Ctrl + +` / `Ctrl + =`：放大圖片
 - `Ctrl + -`：縮小圖片
 - `Ctrl + 0`：調整為符合視窗
-- `滑鼠滾輪`：快速縮放
+- `按住 \` 鍵：快速比較原圖
+- `Enter` / `Esc`：裁切模式中套用 / 取消
+- `滑鼠滾輪`：以游標為中心縮放
 - `按住滑鼠拖曳`：平移檢視縮放後的圖片
 - `滑鼠長按 [比較原圖] 按鈕`：快速比較前後差異
 
@@ -91,4 +111,16 @@
 - **結構**：HTML5 & Semantic HTML
 - **樣式**：純 CSS (Vanilla CSS)，採用 Modern Dark 霓虹主題與毛玻璃面板 (Glassmorphism)
 - **邏輯**：Vanilla JavaScript (高度優化的 ImageData 像素操作)
-- **圖示庫**：Lucide Icons (CDN)
+- **圖示庫**：Lucide Icons（隨專案附帶 `lucide.min.js`）
+- **核心運算**：Rust 編譯的 WebAssembly（`src-rust/`），Wasm 無法載入時自動改用 JS 引擎
+
+### 重新編譯 Wasm 核心
+
+```bash
+rustup target add wasm32-unknown-unknown
+cd src-rust
+cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/image_processor.wasm ../image_processor.wasm
+```
+
+> 修改 `src-rust/src/lib.rs` 的像素演算法時，請同步更新 `app.js` 中的 JS 後備引擎（例如 `grainNoise()`），兩者的結果必須一致。

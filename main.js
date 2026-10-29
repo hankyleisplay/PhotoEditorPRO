@@ -1,81 +1,59 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawnSync } = require('child_process');
+const { execFile } = require('child_process');
 const crypto = require('crypto');
 
 const licenseFile = path.join(app.getPath('userData'), 'license.json');
 
-let cachedHWID = null;
+let hwidPromise = null;
 
+// Runs a PowerShell command without blocking the main process (and without flashing a console window).
+function runPowerShell(command) {
+    return new Promise((resolve) => {
+        execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 10000
+        }, (error, stdout) => {
+            resolve(error ? '' : (stdout || '').trim());
+        });
+    });
+}
+
+async function queryHardwareID() {
+    let boardUUID = "";
+    let cpuID = "";
+
+    // Query both properties in a single PowerShell process
+    const powershellCmd = '$board=(Get-CimInstance Win32_ComputerSystemProduct).UUID; if (!$board -or $board -eq "00000000-0000-0000-0000-000000000000") { $board=(Get-CimInstance Win32_BIOS).SerialNumber }; $cpu=(Get-CimInstance Win32_Processor).ProcessorId; Write-Output "$board|$cpu"';
+    const parts = (await runPowerShell(powershellCmd)).split('|');
+    if (parts.length >= 2) {
+        boardUUID = parts[0].trim();
+        cpuID = parts[1].trim();
+    }
+
+    // Fallback to individual commands if the combined command fails or returns empty results
+    if (!boardUUID && !cpuID) {
+        boardUUID = await runPowerShell('(Get-CimInstance Win32_ComputerSystemProduct).UUID');
+        if (!boardUUID || boardUUID === "00000000-0000-0000-0000-000000000000") {
+            boardUUID = await runPowerShell('(Get-CimInstance Win32_BIOS).SerialNumber');
+        }
+        cpuID = await runPowerShell('(Get-CimInstance Win32_Processor).ProcessorId');
+    }
+
+    if (!boardUUID && !cpuID) {
+        return require('os').hostname() || "UNKNOWN-HOST";
+    }
+    return `${boardUUID}-${cpuID}`.trim();
+}
+
+// Resolved once and cached; the HWID format is unchanged so existing license keys stay valid.
 function getHardwareID() {
-    if (cachedHWID !== null) {
-        return cachedHWID;
+    if (!hwidPromise) {
+        hwidPromise = queryHardwareID().catch(() => "UNKNOWN-HWID");
     }
-
-    try {
-        let boardUUID = "";
-        let cpuID = "";
-
-        // Query both properties in a single PowerShell process using spawnSync to avoid shell quoting/escaping issues
-        const powershellCmd = '$board=(Get-CimInstance Win32_ComputerSystemProduct).UUID; if (!$board -or $board -eq "00000000-0000-0000-0000-000000000000") { $board=(Get-CimInstance Win32_BIOS).SerialNumber }; $cpu=(Get-CimInstance Win32_Processor).ProcessorId; Write-Output "$board|$cpu"';
-        
-        try {
-            const result = spawnSync('powershell', [
-                '-NoProfile',
-                '-WindowStyle', 'Hidden',
-                '-Command',
-                powershellCmd
-            ], { encoding: 'utf8' });
-
-            if (!result.error) {
-                const rawOutput = (result.stdout || '').trim();
-                const parts = rawOutput.split('|');
-                if (parts.length >= 2) {
-                    boardUUID = parts[0].trim();
-                    cpuID = parts[1].trim();
-                }
-            }
-        } catch (e) {
-            // Ignore optimization failure and fall back
-        }
-        
-        // Fallback to individual commands if the optimized single command fails or returns empty results
-        if (!boardUUID && !cpuID) {
-            try {
-                const resUUID = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_ComputerSystemProduct).UUID'], { encoding: 'utf8' });
-                boardUUID = (resUUID.stdout || '').trim();
-            } catch (e) {
-                // Ignore
-            }
-            
-            if (!boardUUID || boardUUID === "00000000-0000-0000-0000-000000000000") {
-                try {
-                    const resBIOS = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_BIOS).SerialNumber'], { encoding: 'utf8' });
-                    boardUUID = (resBIOS.stdout || '').trim();
-                } catch (e) {
-                    // Ignore
-                }
-            }
-            
-            try {
-                const resCPU = spawnSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', '(Get-CimInstance Win32_Processor).ProcessorId'], { encoding: 'utf8' });
-                cpuID = (resCPU.stdout || '').trim();
-            } catch (e) {
-                // Ignore
-            }
-        }
-        
-        if (!boardUUID && !cpuID) {
-            cachedHWID = require('os').hostname() || "UNKNOWN-HOST";
-        } else {
-            cachedHWID = `${boardUUID}-${cpuID}`.trim();
-        }
-        
-        return cachedHWID;
-    } catch (err) {
-        return "UNKNOWN-HWID";
-    }
+    return hwidPromise;
 }
 
 function generateKey(hwid) {
@@ -110,17 +88,17 @@ function generateKey(hwid) {
     return serial;
 }
 
-function isLicenseValid() {
+async function isLicenseValid() {
     if (!fs.existsSync(licenseFile)) return false;
     try {
         const data = JSON.parse(fs.readFileSync(licenseFile, 'utf8'));
-        const hwid = getHardwareID();
-        const expectedKey = generateKey(hwid);
-        return data && data.key === expectedKey;
+        const expectedKey = generateKey(await getHardwareID());
+        return !!expectedKey && !!data && data.key === expectedKey;
     } catch (e) {
         return false;
     }
 }
+
 function createWindow() {
     const mainWindow = new BrowserWindow({
         width: 1280,
@@ -135,6 +113,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: true,   // 渲染程序沙盒化（preload 僅使用 contextBridge / ipcRenderer）
             devTools: false, // 停用開發者工具，防止逆向調試
             
             // 降低系統資源消耗的最佳化設定：
@@ -163,6 +142,12 @@ function createWindow() {
         mainWindow.webContents.closeDevTools();
     });
 
+    // 禁止開啟新視窗或導覽到外部網址（例如拖入檔案或點擊連結時，視窗不應跳轉離開編輯器）
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('will-navigate', (event) => {
+        event.preventDefault();
+    });
+
     // 直接載入本地 HTML 檔案，不需額外啟動本機伺服器，速度最快且最省資源
     mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
@@ -188,7 +173,7 @@ if (!gotTheLock) {
             return getHardwareID();
         });
         
-        ipcMain.handle('check-license', () => {
+        ipcMain.handle('check-license', async () => {
             return isLicenseValid();
         });
         
@@ -202,10 +187,19 @@ if (!gotTheLock) {
             }
         });
         
-        ipcMain.handle('verify-and-save', (event, key) => {
-            const hwid = getHardwareID();
+        ipcMain.handle('load-sample', () => {
+            try {
+                return fs.readFileSync(path.join(__dirname, 'sample.jpg'));
+            } catch (err) {
+                console.error("Failed to load sample image:", err);
+                return null;
+            }
+        });
+        
+        ipcMain.handle('verify-and-save', async (event, key) => {
+            const hwid = await getHardwareID();
             const expected = generateKey(hwid);
-            if (key && key.trim().toUpperCase() === expected) {
+            if (expected && typeof key === 'string' && key.trim().toUpperCase() === expected) {
                 try {
                     fs.writeFileSync(licenseFile, JSON.stringify({ key: key.trim().toUpperCase() }), 'utf8');
                     return true;

@@ -562,8 +562,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 .canvas-wrapper {
     position: relative;
-    max-width: 100%;
-    max-height: 100%;
+    flex: none; /* never let flexbox shrink the canvas: zoom is applied through transform only */
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
     border-radius: var(--radius-sm);
     overflow: hidden;
@@ -576,9 +575,6 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 canvas#editor-canvas {
     display: block;
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
     user-select: none;
 }
 
@@ -1368,3 +1364,164 @@ canvas#editor-canvas {
     }
 }
 
+
+
+/* ==========================================
+ * Drag & drop highlight (window-wide)
+ * ========================================== */
+body.drag-active .canvas-viewport {
+    outline: 2px dashed var(--primary);
+    outline-offset: -10px;
+    background: rgba(99, 102, 241, 0.06);
+}
+
+/* ==========================================
+ * Toast notifications
+ * ========================================== */
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translate(-50%, 16px);
+    max-width: min(90vw, 460px);
+    padding: 10px 18px;
+    border-radius: var(--radius-md);
+    background: rgba(22, 28, 38, 0.95);
+    border: 1px solid var(--border-hover);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 3000;
+    transition: opacity var(--transition-smooth), transform var(--transition-smooth);
+}
+.toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+.toast-success { border-color: rgba(16, 185, 129, 0.6); }
+.toast-error { border-color: rgba(239, 68, 68, 0.7); }
+
+/* ==========================================
+ * Custom presets
+ * ========================================== */
+.custom-presets-section {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border-color);
+}
+.custom-presets-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+.custom-preset-save {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.custom-preset-input {
+    flex: 1;
+    min-width: 0;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    outline: none;
+}
+.custom-preset-input:focus {
+    border-color: var(--primary);
+}
+.custom-presets-empty {
+    grid-column: 1 / -1;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+.custom-preset-row {
+    position: relative;
+    display: flex;
+}
+.custom-preset-row .preset-btn {
+    flex: 1;
+    min-width: 0;
+    padding-right: 26px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.custom-preset-delete {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1rem;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+.custom-preset-delete:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--danger);
+}
+
+/* ==========================================
+ * Export dialog
+ * ========================================== */
+.export-modal {
+    width: 440px;
+    max-width: 92vw;
+    padding: 28px;
+}
+.export-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.export-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.export-row label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+.export-select {
+    width: 100%;
+    background: var(--bg-dark);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    outline: none;
+    cursor: pointer;
+}
+.export-select:focus {
+    border-color: var(--primary);
+}
+.export-size-info {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+.export-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 22px;
+}

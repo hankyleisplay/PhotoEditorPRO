@@ -69,6 +69,17 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     (r * 255.0, g * 255.0, b * 255.0)
 }
 
+// Per-pixel hash noise in [-0.5, 0.5). Must stay in sync with grainNoise() in app.js.
+fn grain_noise(px: u32) -> f32 {
+    let mut h = px.wrapping_mul(0x9E37_79B1);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85EB_CA77);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 16;
+    ((h >> 8) as f32) / 16_777_216.0 - 0.5
+}
+
 struct HslWeights {
     red: f32,
     orange: f32,
@@ -167,6 +178,9 @@ pub unsafe extern "C" fn process_pixels(
     // Blurred data (for sharpening/nr)
     blurred_ptr: *const u8,
 ) {
+    if width == 0 || height == 0 || len % 4 != 0 {
+        return;
+    }
     let src = slice::from_raw_parts(src_ptr, len);
     let dst = slice::from_raw_parts_mut(dst_ptr, len);
     
@@ -368,8 +382,7 @@ pub unsafe extern "C" fn process_pixels(
         
         // --- 12. FILM GRAIN ---
         if grain_factor > 0.0 {
-            let seed = (i as u32).wrapping_mul(9301).wrapping_add(49297) % 233280;
-            let noise = ((seed as f32 / 233280.0) - 0.5) * grain_factor * 0.12 * 255.0;
+            let noise = grain_noise((i / 4) as u32) * grain_factor * 0.12 * 255.0;
             r += noise; g += noise; b += noise;
         }
         
