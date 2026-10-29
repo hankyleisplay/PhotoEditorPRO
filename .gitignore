@@ -4,5 +4,3 @@ target/
 src-rust/target/
 dist-secure/
 build/portable/
-license-private.pem
-*.pem

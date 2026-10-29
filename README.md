@@ -125,3 +125,9 @@ cp target/wasm32-unknown-unknown/release/image_processor.wasm ../image_processor
 ```
 
 > 修改 `src-rust/src/lib.rs` 的像素演算法時，請同步更新 `app.js` 中的 JS 後備引擎（例如 `grainNoise()`），兩者的結果必須一致。
+
+---
+
+## 📄 授權
+
+本專案以 [GNU General Public License v3.0](LICENSE)（GPL-3.0-or-later）釋出，免費且開源，不需要任何授權序號。
