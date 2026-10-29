@@ -1,16 +1,24 @@
 name: Release
 
-# Push a tag such as v1.1.0 to build the Windows installers and publish a GitHub release.
+# Builds the Windows installers and publishes a GitHub release named after package.json's version.
+# Triggers: push a v* tag, run it manually, or push a commit whose message contains "[release]"
+# (the workflow then creates the tag itself).
 on:
   push:
+    branches: ['**']
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +28,16 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Check tag matches package.json version
+      - name: Resolve release tag
+        id: version
         shell: bash
         run: |
           pkg="v$(node -p "require('./package.json').version")"
-          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "$pkg" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
             exit 1
           fi
+          echo "tag=$pkg" >> "$GITHUB_OUTPUT"
 
       - name: Check license public key
         shell: bash
@@ -52,6 +62,9 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Photo Editor PRO ${{ steps.version.outputs.tag }}
           files: dist/*.exe
           generate_release_notes: true
           fail_on_unmatched_files: true
