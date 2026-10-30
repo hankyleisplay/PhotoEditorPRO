@@ -1,7 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('updateAPI', {
-    checkForUpdates: () => ipcRenderer.invoke('check-for-updates')
+    checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+    downloadUpdate: () => ipcRenderer.invoke('download-update'),
+    installUpdate: () => ipcRenderer.invoke('install-update'),
+    installLater: () => ipcRenderer.invoke('install-update-later'),
+    openReleasesPage: () => ipcRenderer.invoke('open-releases-page'),
+    // The callback receives plain status objects only, never the IPC event.
+    onStatus: (callback) => ipcRenderer.on('update-status', (_event, status) => callback(status))
 });
 
 contextBridge.exposeInMainWorld('wasmAPI', {

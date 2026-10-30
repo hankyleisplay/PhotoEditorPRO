@@ -1,4 +1,4 @@
-const { app, dialog, shell, BrowserWindow } = require('electron');
+const { app, shell, BrowserWindow } = require('electron');
 const { autoUpdater } = require('electron-updater');
 
 const RELEASES_URL = 'https://github.com/hankyleisplay/PhotoEditorPRO/releases/latest';
@@ -7,119 +7,84 @@ const RELEASES_URL = 'https://github.com/hankyleisplay/PhotoEditorPRO/releases/l
 const isPortable = !!process.env.PORTABLE_EXECUTABLE_FILE;
 
 let wired = false;
-let manualCheck = false;
+let manualCheck = false;   // the user asked for this check, so every outcome is shown
+let downloading = false;   // a download the user started is in flight, so its errors are shown
 
-function getWindow() {
-    return BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
+// All feedback goes to the editor window, which draws it in its own UI (no native dialogs).
+function send(status) {
+    for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+            win.webContents.send('update-status', status);
+        }
+    }
 }
 
-function showMessage(options) {
-    const win = getWindow();
-    return win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options);
+function setTaskbarProgress(value) {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win && !win.isDestroyed()) win.setProgressBar(value);
 }
 
 function wireUpdater() {
     if (wired) return;
     wired = true;
 
-    // Ask before downloading, and install on the next quit if the user postpones the restart.
+    // The user decides when to download and when to restart.
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
 
-    autoUpdater.on('update-available', async (info) => {
+    autoUpdater.on('update-available', (info) => {
         manualCheck = false;
-        const { response } = await showMessage({
-            type: 'info',
-            title: '發現新版本',
-            message: `Photo Editor PRO ${info.version} 已發布`,
-            detail: `目前版本為 ${app.getVersion()}，要現在下載更新嗎？`,
-            buttons: ['下載更新', '稍後'],
-            defaultId: 0,
-            cancelId: 1
-        });
-        if (response === 0) {
-            autoUpdater.downloadUpdate().catch((e) => console.error('Update download failed:', e));
-        }
+        send({ state: 'available', version: info.version, current: app.getVersion() });
     });
 
     autoUpdater.on('update-not-available', () => {
         if (!manualCheck) return;
         manualCheck = false;
-        showMessage({
-            type: 'info',
-            title: '檢查更新',
-            message: '目前已是最新版本',
-            detail: `版本 ${app.getVersion()}`,
-            buttons: ['好']
-        });
+        send({ state: 'uptodate', current: app.getVersion() });
     });
 
     autoUpdater.on('download-progress', (progress) => {
-        const win = getWindow();
-        if (win) win.setProgressBar(progress.percent / 100);
+        setTaskbarProgress(progress.percent / 100);
+        send({
+            state: 'downloading',
+            percent: progress.percent,
+            speed: progress.bytesPerSecond,
+            transferred: progress.transferred,
+            total: progress.total
+        });
     });
 
-    autoUpdater.on('update-downloaded', async (info) => {
-        const win = getWindow();
-        if (win) win.setProgressBar(-1);
-        const { response } = await showMessage({
-            type: 'info',
-            title: '更新已下載',
-            message: `Photo Editor PRO ${info.version} 已準備好安裝`,
-            detail: '要現在重新啟動並安裝嗎？選擇「稍後」會在下次關閉程式時自動安裝。',
-            buttons: ['重新啟動並安裝', '稍後'],
-            defaultId: 0,
-            cancelId: 1
-        });
-        if (response === 0) {
-            autoUpdater.quitAndInstall();
-        } else {
-            autoUpdater.autoInstallOnAppQuit = true;
-        }
+    autoUpdater.on('update-downloaded', (info) => {
+        downloading = false;
+        setTaskbarProgress(-1);
+        send({ state: 'downloaded', version: info.version });
     });
 
     autoUpdater.on('error', (err) => {
         console.error('Auto-update error:', err);
-        const win = getWindow();
-        if (win) win.setProgressBar(-1);
-        if (!manualCheck) return;
+        setTaskbarProgress(-1);
+        const show = manualCheck || downloading;
         manualCheck = false;
-        showMessage({
-            type: 'warning',
-            title: '檢查更新失敗',
-            message: '無法取得更新資訊，請確認網路連線後再試。',
-            buttons: ['好']
-        });
+        downloading = false;
+        if (show) send({ state: 'error' });
     });
 }
 
 // manual = true when the user clicked "check for updates": then every outcome is reported, not just "update found".
 async function checkForUpdates(manual) {
     if (!app.isPackaged) {
-        if (manual) {
-            await showMessage({ type: 'info', title: '檢查更新', message: '開發模式不支援自動更新。', buttons: ['好'] });
-        }
+        if (manual) send({ state: 'dev' });
         return;
     }
 
     if (isPortable) {
-        if (manual) {
-            const { response } = await showMessage({
-                type: 'info',
-                title: '檢查更新',
-                message: '免安裝版無法自動更新',
-                detail: '請前往 GitHub 下載最新版本，或改用安裝版以取得自動更新。',
-                buttons: ['開啟下載頁面', '取消'],
-                defaultId: 0,
-                cancelId: 1
-            });
-            if (response === 0) shell.openExternal(RELEASES_URL);
-        }
+        if (manual) send({ state: 'portable' });
         return;
     }
 
     wireUpdater();
     manualCheck = manual;
+    if (manual) send({ state: 'checking' });
     try {
         await autoUpdater.checkForUpdates();
     } catch (e) {
@@ -127,4 +92,25 @@ async function checkForUpdates(manual) {
     }
 }
 
-module.exports = { checkForUpdates };
+function downloadUpdate() {
+    downloading = true;
+    send({ state: 'downloading', percent: 0, speed: 0, transferred: 0, total: 0 });
+    autoUpdater.downloadUpdate().catch(() => {
+        // The 'error' event handler already reports it.
+    });
+}
+
+function installUpdate() {
+    autoUpdater.quitAndInstall();
+}
+
+// "Later": install when the user next closes the app.
+function installOnQuit() {
+    autoUpdater.autoInstallOnAppQuit = true;
+}
+
+function openReleasesPage() {
+    shell.openExternal(RELEASES_URL);
+}
+
+module.exports = { checkForUpdates, downloadUpdate, installUpdate, installOnQuit, openReleasesPage };

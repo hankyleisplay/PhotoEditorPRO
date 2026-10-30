@@ -844,10 +844,39 @@
                 </p>
             </div>
             <div class="modal-footer" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 12px; display: flex; justify-content: flex-end;">
-                <button class="btn btn-secondary" id="btn-check-update" style="padding: 8px 20px; font-size: 0.8rem; margin-right: 8px; display: none;">檢查更新</button>
+                <button class="btn btn-secondary jelly" id="btn-check-update" style="padding: 8px 20px; font-size: 0.8rem; margin-right: 8px; display: none;"><span class="btn-spinner" aria-hidden="true"></span><span class="btn-label">檢查更新</span></button>
                 <button class="btn btn-primary" id="btn-legal-confirm" style="padding: 8px 20px; font-size: 0.8rem;">關閉</button>
             </div>
         </div>
+    </div>
+
+    <!-- Update Card (Liquid Glass) -->
+    <div id="update-card" class="update-card" data-state="idle" role="status" aria-live="polite" hidden>
+        <span class="glass-blob blob-a" aria-hidden="true"></span>
+        <span class="glass-blob blob-b" aria-hidden="true"></span>
+        <button class="update-close jelly" id="update-close" aria-label="關閉"><i data-lucide="x"></i></button>
+        <div class="update-head">
+            <div class="update-icon" aria-hidden="true">
+                <span class="update-ring"></span>
+                <i data-lucide="refresh-cw" class="ic ic-checking"></i>
+                <i data-lucide="check" class="ic ic-uptodate"></i>
+                <i data-lucide="sparkles" class="ic ic-available"></i>
+                <i data-lucide="arrow-down" class="ic ic-downloading"></i>
+                <i data-lucide="rocket" class="ic ic-downloaded"></i>
+                <i data-lucide="triangle-alert" class="ic ic-error"></i>
+                <i data-lucide="globe" class="ic ic-portable"></i>
+                <i data-lucide="wrench" class="ic ic-dev"></i>
+            </div>
+            <div class="update-text">
+                <div class="update-title" id="update-title"></div>
+                <div class="update-desc" id="update-desc"></div>
+            </div>
+        </div>
+        <div class="update-progress" id="update-progress" aria-hidden="true">
+            <div class="update-bar"><div class="update-fill" id="update-fill"></div></div>
+            <div class="update-meta"><span id="update-percent">0%</span><span id="update-speed"></span></div>
+        </div>
+        <div class="update-actions" id="update-actions"></div>
     </div>
 
     <script src="app.js"></script>

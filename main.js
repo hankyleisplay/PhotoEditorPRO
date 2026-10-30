@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { checkForUpdates } = require('./updater');
+const updater = require('./updater');
 
 function createWindow() {
     const mainWindow = new BrowserWindow({
@@ -92,12 +92,16 @@ if (!gotTheLock) {
             }
         });
         
-        ipcMain.handle('check-for-updates', () => checkForUpdates(true));
+        ipcMain.handle('check-for-updates', () => updater.checkForUpdates(true));
+        ipcMain.handle('download-update', () => updater.downloadUpdate());
+        ipcMain.handle('install-update', () => updater.installUpdate());
+        ipcMain.handle('install-update-later', () => updater.installOnQuit());
+        ipcMain.handle('open-releases-page', () => updater.openReleasesPage());
 
         createWindow();
 
         // Give the editor time to finish loading before the background update check.
-        setTimeout(() => checkForUpdates(false), 5000);
+        setTimeout(() => updater.checkForUpdates(false), 5000);
 
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) createWindow();

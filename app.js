@@ -614,20 +614,179 @@ function setupCustomPresets() {
     });
 }
 
+// Update feedback: a glass card with jelly motion, driven by status messages from the main process.
+function setupUpdateUI() {
+    const api = window.updateAPI;
+    const card = document.getElementById('update-card');
+    const btnCheck = document.getElementById('btn-check-update');
+    if (!api || !card) return; // browser / dev server: there is no updater
+
+    const title = document.getElementById('update-title');
+    const desc = document.getElementById('update-desc');
+    const fill = document.getElementById('update-fill');
+    const percentEl = document.getElementById('update-percent');
+    const speedEl = document.getElementById('update-speed');
+    const actions = document.getElementById('update-actions');
+    const btnClose = document.getElementById('update-close');
+    const checkLabel = btnCheck && btnCheck.querySelector('.btn-label');
+
+    let hideTimer = null;
+    let leaveTimer = null;
+
+    if (btnCheck) {
+        btnCheck.style.display = '';
+        btnCheck.addEventListener('click', () => {
+            // Instant feedback, before the main process has answered
+            setChecking(true);
+            setContent('正在檢查更新…', '正在連線到 GitHub，請稍候', []);
+            show('checking');
+            api.checkForUpdates();
+        });
+    }
+
+    function setChecking(on) {
+        if (!btnCheck) return;
+        btnCheck.classList.toggle('is-checking', on);
+        if (checkLabel) checkLabel.textContent = on ? '檢查中…' : '檢查更新';
+    }
+
+    function hide() {
+        clearTimeout(hideTimer);
+        if (card.hidden || card.classList.contains('leaving')) return;
+        card.classList.add('leaving');
+        clearTimeout(leaveTimer);
+        leaveTimer = setTimeout(() => {
+            card.hidden = true;
+            card.classList.remove('leaving');
+        }, 380);
+    }
+
+    function show(state) {
+        clearTimeout(hideTimer);
+        clearTimeout(leaveTimer);
+        const wasHidden = card.hidden || card.classList.contains('leaving');
+        card.classList.remove('leaving');
+        if (wasHidden) {
+            // Restart the entrance animation
+            card.hidden = false;
+            card.style.animation = 'none';
+            void card.offsetWidth;
+            card.style.animation = '';
+        }
+        card.dataset.state = state;
+    }
+
+    function button(label, onClick, primary) {
+        const b = document.createElement('button');
+        b.className = 'glass-btn jelly' + (primary ? ' primary' : '');
+        b.textContent = label;
+        b.addEventListener('click', onClick);
+        return b;
+    }
+
+    function setContent(titleText, descText, buttons) {
+        title.textContent = titleText;
+        desc.textContent = descText;
+        actions.replaceChildren(...buttons);
+    }
+
+    const mb = (bytes) => (bytes / 1048576).toFixed(1);
+
+    api.onStatus((s) => {
+        if (s.state !== 'checking') setChecking(false);
+
+        switch (s.state) {
+            case 'checking':
+                setContent('正在檢查更新…', '正在連線到 GitHub，請稍候', []);
+                show('checking');
+                break;
+            case 'uptodate':
+                setContent('已是最新版本', `目前版本 ${s.current}，沒有可用的更新`, []);
+                show('uptodate');
+                hideTimer = setTimeout(hide, 3200);
+                break;
+            case 'available':
+                setContent(`發現新版本 ${s.version}`, `目前版本為 ${s.current}，要現在下載更新嗎？`, [
+                    button('稍後', hide, false),
+                    button('下載更新', () => {
+                        setContent('準備下載…', '正在向伺服器要求更新檔', []);
+                        show('downloading');
+                        api.downloadUpdate();
+                    }, true)
+                ]);
+                show('available');
+                break;
+            case 'downloading': {
+                const pct = Math.max(0, Math.min(100, s.percent || 0));
+                if (card.dataset.state !== 'downloading') {
+                    setContent('正在下載更新…', '下載期間可以繼續編輯相片', []);
+                    show('downloading');
+                }
+                fill.style.width = pct + '%';
+                percentEl.textContent = Math.floor(pct) + '%';
+                speedEl.textContent = s.total ? `${mb(s.transferred)} / ${mb(s.total)} MB · ${mb(s.speed)} MB/s` : '';
+                if (pct > 0) {
+                    title.textContent = '正在下載更新…';
+                    desc.textContent = '下載期間可以繼續編輯相片';
+                }
+                break;
+            }
+            case 'downloaded':
+                setContent(`${s.version} 已準備好`, '重新啟動即可完成安裝，也可以稍後在關閉程式時自動安裝。', [
+                    button('稍後', () => { api.installLater(); hide(); }, false),
+                    button('重新啟動並安裝', () => {
+                        setContent('正在重新啟動…', '安裝完成後會自動開啟新版本', []);
+                        api.installUpdate();
+                    }, true)
+                ]);
+                show('downloaded');
+                break;
+            case 'portable':
+                setContent('免安裝版無法自動更新', '請到 GitHub 下載最新版本，或改用安裝版以取得自動更新。', [
+                    button('取消', hide, false),
+                    button('開啟下載頁面', () => { api.openReleasesPage(); hide(); }, true)
+                ]);
+                show('portable');
+                break;
+            case 'dev':
+                setContent('開發模式', '開發模式不支援自動更新。', []);
+                show('dev');
+                hideTimer = setTimeout(hide, 3200);
+                break;
+            case 'error':
+                setContent('檢查更新失敗', '無法取得更新資訊，請確認網路連線後再試一次。', [
+                    button('關閉', hide, false),
+                    button('重試', () => {
+                        setChecking(true);
+                        show('checking');
+                        setContent('正在檢查更新…', '正在連線到 GitHub，請稍候', []);
+                        api.checkForUpdates();
+                    }, true)
+                ]);
+                show('error');
+                break;
+        }
+    });
+
+    btnClose.addEventListener('click', hide);
+
+    // The glass highlight follows the pointer
+    card.addEventListener('pointermove', (e) => {
+        const r = card.getBoundingClientRect();
+        card.style.setProperty('--mx', ((e.clientX - r.left) / r.width * 100).toFixed(1) + '%');
+        card.style.setProperty('--my', ((e.clientY - r.top) / r.height * 100).toFixed(1) + '%');
+    });
+    // Keep the card while the pointer rests on it
+    card.addEventListener('pointerenter', () => clearTimeout(hideTimer));
+
+    if (window.lucide) lucide.createIcons();
+}
+
 function setupLegalModal() {
     const legalOverlay = document.getElementById('legal-overlay');
     const btnLegal = document.getElementById('btn-legal');
     const btnCloseLegal = document.getElementById('btn-close-legal');
     const btnLegalConfirm = document.getElementById('btn-legal-confirm');
-    const btnCheckUpdate = document.getElementById('btn-check-update');
-
-    // Only the desktop app can update itself; the web/dev version has no updater.
-    if (btnCheckUpdate && window.updateAPI) {
-        btnCheckUpdate.style.display = '';
-        btnCheckUpdate.addEventListener('click', () => {
-            window.updateAPI.checkForUpdates();
-        });
-    }
 
     if (btnLegal && legalOverlay) {
         btnLegal.addEventListener('click', () => {
@@ -684,6 +843,7 @@ function init() {
     setupCustomPresets();
     setupExportDialog();
     setupBatchDialog();
+    setupUpdateUI();
     setupLegalModal();
 
     recomputeAllCurveLUTs();
