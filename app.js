@@ -782,6 +782,33 @@ function setupUpdateUI() {
     if (window.lucide) lucide.createIcons();
 }
 
+// Liquid Glass: a soft highlight on glass controls follows the pointer (drives --mx / --my in liquid-glass.css).
+function setupLiquidGlass() {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const SELECTOR = '.btn, .btn-icon, .preset-btn, .frame-btn, .curve-chan-btn, .accordion-item, .dropzone';
+    let target = null;
+    let x = 0;
+    let y = 0;
+    let queued = false;
+    
+    document.addEventListener('pointermove', (e) => {
+        const el = e.target.closest ? e.target.closest(SELECTOR) : null;
+        if (!el) return;
+        target = el;
+        x = e.clientX;
+        y = e.clientY;
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(() => {
+            queued = false;
+            const r = target.getBoundingClientRect();
+            if (!r.width || !r.height) return;
+            target.style.setProperty('--mx', ((x - r.left) / r.width * 100).toFixed(1) + '%');
+            target.style.setProperty('--my', ((y - r.top) / r.height * 100).toFixed(1) + '%');
+        });
+    }, { passive: true });
+}
+
 function setupLegalModal() {
     const legalOverlay = document.getElementById('legal-overlay');
     const btnLegal = document.getElementById('btn-legal');
@@ -844,6 +871,7 @@ function init() {
     setupExportDialog();
     setupBatchDialog();
     setupUpdateUI();
+    setupLiquidGlass();
     setupLegalModal();
 
     recomputeAllCurveLUTs();

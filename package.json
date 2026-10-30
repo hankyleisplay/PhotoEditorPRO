@@ -48,6 +48,7 @@
       "image_processor.wasm",
       "index.html",
       "style.css",
+      "liquid-glass.css",
       "fonts/*",
       "lucide.min.js",
       "sample.jpg",
