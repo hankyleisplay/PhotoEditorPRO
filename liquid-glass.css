@@ -534,16 +534,38 @@ input[type="range"]:active::-webkit-slider-thumb {
     border-radius: 50%;
     display: grid;
     place-items: center;
+    padding: 0;
+    line-height: 1;
     font-size: 1.25rem;
     background: rgba(255, 255, 255, 0.08) !important;
     transition: transform 0.45s var(--jelly), background 0.2s ease, color 0.2s ease;
 }
 .modal-close:hover {
     background: rgba(255, 255, 255, 0.2) !important;
-    transform: scale(1.12) rotate(90deg);
+    color: #fff;
+    transform: scale(1.14);
 }
 .modal-close:active {
-    transform: scale(0.88);
+    transform: scale(0.86);
+    transition-duration: 0.1s;
+}
+
+/* Scrollbars inside dialogs: thin glass pills instead of the default arrows */
+.modal-body::-webkit-scrollbar {
+    width: 8px;
+}
+.modal-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+.modal-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.34);
+}
+.modal-body::-webkit-scrollbar-button {
+    display: none;
 }
 
 .animate-scale-in {
